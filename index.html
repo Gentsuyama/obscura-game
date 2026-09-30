@@ -17,6 +17,7 @@
   canvas {
     background: #000; cursor: none;
     max-width: 100vw; max-height: 100vh;
+    max-width: 100dvw; max-height: 100dvh;  /* considera a barra do navegador móvel */
     width: auto; height: auto;
     aspect-ratio: 1200 / 680;
     touch-action: none;
@@ -435,6 +436,20 @@ function aimAngle() {
 const touchUI = { seen: false, joyId: null, bx: 0, by: 0, jx: 0, jy: 0, aimId: null };
 const BTN_PHOTO = { x: 1085, y: 555, r: 52 };
 const BTN_ALBUM = { x: 1130, y: 62, r: 36 };
+const BTN_FS    = { x: 1130, y: 150, r: 30 };   // tela cheia (só no touch)
+
+function enterFullscreen() {
+  try {
+    if (!document.fullscreenElement && document.documentElement.requestFullscreen)
+      document.documentElement.requestFullscreen().then(() => {
+        try { screen.orientation.lock("landscape").catch(() => {}); } catch (e) {}
+      }).catch(() => {});
+  } catch (e) {}
+}
+function toggleFullscreen() {
+  if (document.fullscreenElement) { try { document.exitFullscreen(); } catch (e) {} }
+  else enterFullscreen();
+}
 
 function tcoord(t) {
   const rct = canvas.getBoundingClientRect();
@@ -449,7 +464,7 @@ canvas.addEventListener("touchstart", e => {
   touchUI.seen = true;
   for (const t of e.changedTouches) {
     const p = tcoord(t);
-    if (state === "intro") { startGame(); return; }
+    if (state === "intro") { enterFullscreen(); startGame(); return; }
     if (state === "dead") {
       if (Math.abs(p.x - canvas.width / 2) < 130 &&
           p.y > canvas.height / 2 + 92 && p.y < canvas.height / 2 + 148) {
@@ -471,6 +486,9 @@ canvas.addEventListener("touchstart", e => {
     if (Math.hypot(p.x - BTN_ALBUM.x, p.y - BTN_ALBUM.y) < BTN_ALBUM.r + 16) {
       state = "album"; albumReturn = "play";
       albumIdx = Math.max(0, album.length - 1); continue;
+    }
+    if (Math.hypot(p.x - BTN_FS.x, p.y - BTN_FS.y) < BTN_FS.r + 14) {
+      toggleFullscreen(); continue;
     }
     if (p.x < canvas.width * 0.42 && touchUI.joyId === null) {
       touchUI.joyId = t.identifier;
@@ -1938,6 +1956,22 @@ function drawHUD() {
     ctx.fillStyle = "rgba(255,255,255,0.6)";
     ctx.font = "bold 11px 'Courier New', monospace";
     ctx.fillText("ÁLBUM", BTN_ALBUM.x, BTN_ALBUM.y + 1);
+
+    // botão tela cheia: ícone de cantos (sem depender de fonte)
+    ctx.strokeStyle = "rgba(255,255,255,0.35)";
+    ctx.beginPath(); ctx.arc(BTN_FS.x, BTN_FS.y, BTN_FS.r, 0, 7); ctx.stroke();
+    ctx.strokeStyle = "rgba(255,255,255,0.65)";
+    ctx.lineWidth = 2;
+    const fsIn = !!document.fullscreenElement;
+    const cs = 11, cl = 5, dirIco = fsIn ? -1 : 1;   // cantos p/ fora = entrar, p/ dentro = sair
+    for (const [sx2, sy2] of [[-1, -1], [1, -1], [-1, 1], [1, 1]]) {
+      const bx2 = BTN_FS.x + sx2 * cs, by2 = BTN_FS.y + sy2 * cs;
+      ctx.beginPath();
+      ctx.moveTo(bx2 - sx2 * cl * dirIco, by2);
+      ctx.lineTo(bx2, by2);
+      ctx.lineTo(bx2, by2 - sy2 * cl * dirIco);
+      ctx.stroke();
+    }
     ctx.textAlign = "left";
   }
   ctx.fillStyle = flashCd <= 0 && film > 0 ? "rgba(120,255,120,0.7)" : "rgba(255,120,120,0.7)";
@@ -1967,7 +2001,7 @@ function drawIntro() {
     "",
     "WASD / setas: mover      mouse: lanterna",
     "botão direito: fotografar      F: álbum de fotos",
-    "celular: arraste à esquerda p/ andar, à direita p/ mirar",
+    "celular: arraste à esquerda p/ andar, à direita p/ mirar (abre em tela cheia)",
   ];
   lines.forEach((l, i) => ctx.fillText(l, canvas.width / 2, 240 + i * 26));
 
