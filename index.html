@@ -418,6 +418,7 @@ canvas.addEventListener("mousemove", e => {
   const r = canvas.getBoundingClientRect();
   mouse.x = (e.clientX - r.left) * (canvas.width / r.width);
   mouse.y = (e.clientY - r.top) * (canvas.height / r.height);
+  aimSource = "mouse";
 });
 canvas.addEventListener("contextmenu", e => e.preventDefault());
 canvas.addEventListener("mousedown", e => {
@@ -427,16 +428,30 @@ canvas.addEventListener("mousedown", e => {
 });
 
 function aimAngle() {
+  if (aimSource === "stick") return aimDirStick;
   return Math.atan2(mouse.y - player.y * CELL, mouse.x - player.x * CELL);
 }
 
 // ------------------------------------------------------------------
 // TOQUE (celular): esquerda = joystick, direita = mirar, botões na tela
 // ------------------------------------------------------------------
-const touchUI = { seen: false, joyId: null, bx: 0, by: 0, jx: 0, jy: 0, aimId: null };
-const BTN_PHOTO = { x: 1085, y: 555, r: 52 };
+const touchUI = { seen: false, joyId: null, bx: 0, by: 0, jx: 0, jy: 0,
+                  aimId: null, akx: 0, aky: 0 };
+const AIM_STICK = { x: 1060, y: 545, r: 75, travel: 46, knob: 24 };  // direcional fixo
+const BTN_PHOTO = { x: 1060, y: 400, r: 48 };                        // acima do direcional
 const BTN_ALBUM = { x: 1130, y: 62, r: 36 };
 const BTN_FS    = { x: 1130, y: 150, r: 30 };   // tela cheia (só no touch)
+
+// direção da lanterna: mouse (aponta para o cursor) ou direcional (ângulo fixo)
+let aimSource = "mouse", aimDirStick = 0;
+
+function updateAimStick(p) {
+  const dx = p.x - AIM_STICK.x, dy = p.y - AIM_STICK.y;
+  const d = Math.hypot(dx, dy);
+  if (d > 8) { aimDirStick = Math.atan2(dy, dx); aimSource = "stick"; }
+  const cl = Math.min(d, AIM_STICK.travel) / (d || 1);   // knob preso no círculo
+  touchUI.akx = dx * cl; touchUI.aky = dy * cl;
+}
 
 function enterFullscreen() {
   try {
@@ -490,13 +505,14 @@ canvas.addEventListener("touchstart", e => {
     if (Math.hypot(p.x - BTN_FS.x, p.y - BTN_FS.y) < BTN_FS.r + 14) {
       toggleFullscreen(); continue;
     }
-    if (p.x < canvas.width * 0.42 && touchUI.joyId === null) {
+    if (touchUI.aimId === null &&
+        Math.hypot(p.x - AIM_STICK.x, p.y - AIM_STICK.y) < AIM_STICK.r + 40) {
+      touchUI.aimId = t.identifier;
+      updateAimStick(p);
+    } else if (p.x < canvas.width * 0.42 && touchUI.joyId === null) {
       touchUI.joyId = t.identifier;
       touchUI.bx = p.x; touchUI.by = p.y;
       touchUI.jx = 0; touchUI.jy = 0;
-    } else if (touchUI.aimId === null) {
-      touchUI.aimId = t.identifier;
-      mouse.x = p.x; mouse.y = p.y;
     }
   }
 }, { passive: false });
@@ -512,7 +528,7 @@ canvas.addEventListener("touchmove", e => {
       touchUI.jx = dx / d * (cl / 55);
       touchUI.jy = dy / d * (cl / 55);
     } else if (t.identifier === touchUI.aimId) {
-      mouse.x = p.x; mouse.y = p.y;
+      updateAimStick(p);
     }
   }
 }, { passive: false });
@@ -521,7 +537,10 @@ function touchEnd(e) {
   e.preventDefault();
   for (const t of e.changedTouches) {
     if (t.identifier === touchUI.joyId) { touchUI.joyId = null; touchUI.jx = 0; touchUI.jy = 0; }
-    if (t.identifier === touchUI.aimId) touchUI.aimId = null;
+    if (t.identifier === touchUI.aimId) {           // knob volta ao centro,
+      touchUI.aimId = null;                          // lanterna mantém a direção
+      touchUI.akx = 0; touchUI.aky = 0;
+    }
   }
 }
 canvas.addEventListener("touchend", touchEnd, { passive: false });
@@ -1872,8 +1891,8 @@ function render() {
 
   ctx.setTransform(1, 0, 0, 1, 0, 0);
 
-  // --- mira ---
-  if (state === "play") {
+  // --- mira (só faz sentido com mouse) ---
+  if (state === "play" && aimSource === "mouse") {
     ctx.strokeStyle = "rgba(255,255,255,0.55)";
     ctx.lineWidth = 1;
     ctx.beginPath();
@@ -1944,7 +1963,23 @@ function drawHUD() {
       ctx.arc(touchUI.bx + touchUI.jx * 55, touchUI.by + touchUI.jy * 55, 18, 0, 7);
       ctx.fill();
     }
+    // direcional FIXO da lanterna (knob preso no círculo, volta ao centro)
     ctx.lineWidth = 2;
+    ctx.strokeStyle = "rgba(255,255,255,0.3)";
+    ctx.beginPath(); ctx.arc(AIM_STICK.x, AIM_STICK.y, AIM_STICK.r, 0, 7); ctx.stroke();
+    const ad = aimAngle();      // marcador da direção atual da lanterna
+    ctx.strokeStyle = "rgba(255,255,220,0.45)";
+    ctx.beginPath();
+    ctx.moveTo(AIM_STICK.x + Math.cos(ad) * (AIM_STICK.r - 8),
+               AIM_STICK.y + Math.sin(ad) * (AIM_STICK.r - 8));
+    ctx.lineTo(AIM_STICK.x + Math.cos(ad) * (AIM_STICK.r + 8),
+               AIM_STICK.y + Math.sin(ad) * (AIM_STICK.r + 8));
+    ctx.stroke();
+    ctx.fillStyle = touchUI.aimId !== null ? "rgba(255,255,255,0.45)" : "rgba(255,255,255,0.22)";
+    ctx.beginPath();
+    ctx.arc(AIM_STICK.x + touchUI.akx, AIM_STICK.y + touchUI.aky, AIM_STICK.knob, 0, 7);
+    ctx.fill();
+
     ctx.textAlign = "center";
     ctx.strokeStyle = "rgba(255,255,255,0.4)";
     ctx.beginPath(); ctx.arc(BTN_PHOTO.x, BTN_PHOTO.y, BTN_PHOTO.r, 0, 7); ctx.stroke();
