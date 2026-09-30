@@ -95,6 +95,7 @@ let dmgSfxT = 0;
 let transT = 0;
 
 let album = [], albumIdx = 0, photoCount = 0;
+let albumReturn = "play";   // para onde o álbum volta ao fechar (play ou dead)
 
 let time = 0, last = performance.now();
 
@@ -386,15 +387,24 @@ window.addEventListener("keydown", e => {
     if (e.code === "Enter" || e.code === "Space") startGame();
     return;
   }
-  if (state === "dead" && e.code === "Enter") { retry(); return; }
+  if (state === "dead") {
+    if (e.code === "Enter") { retry(); return; }
+    if (e.code === "KeyF") {                       // rever as fotos da run
+      state = "album"; albumReturn = "dead";
+      albumIdx = Math.max(0, album.length - 1);
+    }
+    return;
+  }
 
   if (e.code === "KeyF") {
-    if (state === "play") { state = "album"; albumIdx = Math.max(0, album.length - 1); }
-    else if (state === "album") state = "play";
+    if (state === "play") {
+      state = "album"; albumReturn = "play";
+      albumIdx = Math.max(0, album.length - 1);
+    } else if (state === "album") state = albumReturn;
     return;
   }
   if (state === "album") {
-    if (e.code === "Escape") state = "play";
+    if (e.code === "Escape") state = albumReturn;
     if (e.code === "ArrowLeft"  && albumIdx > 0) albumIdx--;
     if (e.code === "ArrowRight" && albumIdx < album.length - 1) albumIdx++;
     return;
@@ -440,19 +450,27 @@ canvas.addEventListener("touchstart", e => {
   for (const t of e.changedTouches) {
     const p = tcoord(t);
     if (state === "intro") { startGame(); return; }
-    if (state === "dead") { retry(); return; }
+    if (state === "dead") {
+      if (Math.abs(p.x - canvas.width / 2) < 130 &&
+          p.y > canvas.height / 2 + 92 && p.y < canvas.height / 2 + 148) {
+        state = "album"; albumReturn = "dead";
+        albumIdx = Math.max(0, album.length - 1);
+      } else retry();
+      return;
+    }
     if (state === "album") {
       if (album.length && p.x > canvas.width * 0.66)
         albumIdx = Math.min(album.length - 1, albumIdx + 1);
       else if (album.length && p.x < canvas.width * 0.33 && albumIdx > 0) albumIdx--;
-      else state = "play";
+      else state = albumReturn;
       return;
     }
     if (Math.hypot(p.x - BTN_PHOTO.x, p.y - BTN_PHOTO.y) < BTN_PHOTO.r + 16) {
       takePhoto(); continue;
     }
     if (Math.hypot(p.x - BTN_ALBUM.x, p.y - BTN_ALBUM.y) < BTN_ALBUM.r + 16) {
-      state = "album"; albumIdx = Math.max(0, album.length - 1); continue;
+      state = "album"; albumReturn = "play";
+      albumIdx = Math.max(0, album.length - 1); continue;
     }
     if (p.x < canvas.width * 0.42 && touchUI.joyId === null) {
       touchUI.joyId = t.identifier;
@@ -492,7 +510,14 @@ canvas.addEventListener("touchend", touchEnd, { passive: false });
 canvas.addEventListener("touchcancel", touchEnd, { passive: false });
 
 function startGame() { initAudio(); genLevel(); state = "play"; }
-function retry() { sanity = 100; film = FILM_START; seed = (seed + 1337) | 0; genLevel(); state = "play"; }
+function retry() {
+  sanity = 100; film = FILM_START;
+  album = []; albumIdx = 0; photoCount = 0;   // o filme da run anterior se perde
+  albumReturn = "play";
+  seed = (seed + 1337) | 0;
+  genLevel();
+  state = "play";
+}
 
 // ==================================================================
 // FOTO (mecânica + render 3D)
@@ -1995,8 +2020,21 @@ function drawDead() {
   ctx.font = "bold 14px 'Courier New', monospace";
   ctx.fillStyle = "rgba(180,180,180,0.8)";
   ctx.fillText(`você resistiu até a noite ${level}`, canvas.width / 2, canvas.height / 2 + 16);
+  ctx.fillStyle = "rgba(170,170,170,0.85)";
+  ctx.fillText("F — rever as fotos que você revelou", canvas.width / 2, canvas.height / 2 + 58);
   ctx.fillStyle = `rgba(255,255,255,${0.4 + 0.4 * Math.sin(time * 3)})`;
-  ctx.fillText("ENTER para tentar novamente", canvas.width / 2, canvas.height / 2 + 60);
+  ctx.fillText("ENTER — tentar novamente (as fotos se perdem)", canvas.width / 2, canvas.height / 2 + 86);
+
+  if (touchUI.seen) {   // botão de toque para rever as fotos
+    ctx.strokeStyle = "rgba(255,255,255,0.5)";
+    ctx.lineWidth = 1.5;
+    ctx.strokeRect(canvas.width / 2 - 130, canvas.height / 2 + 92, 260, 56);
+    ctx.fillStyle = "rgba(220,220,220,0.85)";
+    ctx.fillText("VER FOTOS", canvas.width / 2, canvas.height / 2 + 114);
+    ctx.font = "bold 11px 'Courier New', monospace";
+    ctx.fillStyle = "rgba(150,150,150,0.7)";
+    ctx.fillText("(toque fora do botão para recomeçar)", canvas.width / 2, canvas.height / 2 + 134);
+  }
 }
 
 function drawTransition() {
