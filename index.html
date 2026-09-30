@@ -1,0 +1,2039 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>OBSCURA</title>
+<style>
+  html, body {
+    margin: 0; padding: 0;
+    background: #000;
+    height: 100%;
+    overflow: hidden;
+    display: flex; align-items: center; justify-content: center;
+  }
+  /* resolução interna fixa (1200x680); CSS escala mantendo proporção,
+     preparando a exibição em telas menores/celular */
+  canvas {
+    background: #000; cursor: none;
+    max-width: 100vw; max-height: 100vh;
+    width: auto; height: auto;
+    aspect-ratio: 1200 / 680;
+    touch-action: none;
+  }
+</style>
+</head>
+<body>
+<canvas id="game" width="1200" height="680"></canvas>
+<script>
+"use strict";
+
+// ==================================================================
+// CONFIG
+// ==================================================================
+const CELL = 10;
+const COLS = 120, ROWS = 68;
+const RAMP = " .:-=+*#%@";
+
+const LANTERNA = { halfAngle: 0.42, range: 34, rays: 180, power: 1.0 };
+const FLASH    = { halfAngle: 0.85, range: 58, rays: 320, power: 2.6,
+                   duration: 1.0, cooldown: 1.6 };
+
+const PLAYER_SPEED  = 10;      // reduzido (era 14)
+const PLAYER_RADIUS = 0.42;
+
+const FILM_START = 6, FILM_MAX = 12, FILM_REFILL = 3;
+const ALBUM_MAX  = 24;
+
+// ==================================================================
+// RNG com seed (procedural, determinístico)
+// ==================================================================
+function mulberry32(a) {
+  return function() {
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+let rng = mulberry32(1);
+
+function hash(x, y, t) {
+  let n = x * 374761393 + y * 668265263 + t * 2246822519;
+  n = (n ^ (n >> 13)) * 1274126177;
+  return ((n ^ (n >> 16)) >>> 0) / 4294967295;
+}
+
+// ==================================================================
+// ESTADO GLOBAL
+// ==================================================================
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+
+let state = "intro";     // intro | play | album | dead | transition
+let level = 1;
+let seed  = (Date.now() % 1e9) | 0;
+
+const grid  = new Uint8Array(COLS * ROWS);
+const light = new Float32Array(COLS * ROWS);
+
+const player = { x: 20, y: 16 };
+const mouse  = { x: 600, y: 340 };
+const keys   = new Set();
+
+let rooms = [], anomalies = [], filmPickups = [], ghosts = [], particles = [];
+let exitP = { x: 0, y: 0, active: false };
+
+let film = FILM_START, sanity = 100;
+let flashT = 0, flashDir = 0, flashCd = 0;
+let attractT = 0;            // fantasmas atraídos pelo flash
+let shake = 0, flickDip = 0;
+let announceT = 0, announceText = "";
+let eventT = 12;             // próximo evento de tensão
+let hbT = 0;                 // heartbeat
+let dmgSfxT = 0;
+let transT = 0;
+
+let album = [], albumIdx = 0, photoCount = 0;
+
+let time = 0, last = performance.now();
+
+// ==================================================================
+// MAPA PROCEDURAL: salas aleatórias + corredores em L
+// ==================================================================
+function carve(x, y, w, h) {
+  for (let j = y; j < y + h; j++)
+    for (let i = x; i < x + w; i++)
+      if (i > 0 && j > 0 && i < COLS - 1 && j < ROWS - 1) grid[j * COLS + i] = 0;
+}
+function isWall(cx, cy) {
+  if (cx < 0 || cy < 0 || cx >= COLS || cy >= ROWS) return true;
+  return grid[cy * COLS + cx] === 1;
+}
+function roomCenter(r) { return { x: r.x + r.w / 2, y: r.y + r.h / 2 }; }
+
+function overlaps(a, b, m) {
+  return a.x - m < b.x + b.w && a.x + a.w + m > b.x &&
+         a.y - m < b.y + b.h && a.y + a.h + m > b.y;
+}
+
+function corridorH(x1, x2, y) { carve(Math.min(x1, x2) - 1, y - 1, Math.abs(x2 - x1) + 3, 3); }
+function corridorV(y1, y2, x) { carve(x - 1, Math.min(y1, y2) - 1, 3, Math.abs(y2 - y1) + 3); }
+function connect(a, b) {
+  const ca = roomCenter(a), cb = roomCenter(b);
+  const ax = ca.x | 0, ay = ca.y | 0, bx = cb.x | 0, by = cb.y | 0;
+  if (rng() < 0.5) { corridorH(ax, bx, ay); corridorV(ay, by, bx); }
+  else             { corridorV(ay, by, ax); corridorH(ax, bx, by); }
+}
+
+function randInRoom(r, margin) {
+  const m = margin || 2;
+  return {
+    x: r.x + m + rng() * (r.w - m * 2),
+    y: r.y + m + rng() * (r.h - m * 2),
+  };
+}
+
+function genLevel() {
+  rng = mulberry32(seed + level * 7919);
+  grid.fill(1);
+  rooms = []; anomalies = []; filmPickups = []; ghosts = []; particles = [];
+
+  // --- salas ---
+  const target = 7 + Math.min(level, 4);
+  for (let tries = 0; tries < 120 && rooms.length < target; tries++) {
+    const w = 10 + (rng() * 14 | 0), h = 7 + (rng() * 8 | 0);
+    const x = 2 + (rng() * (COLS - w - 4) | 0);
+    const y = 2 + (rng() * (ROWS - h - 4) | 0);
+    const r = { x, y, w, h };
+    if (rooms.some(o => overlaps(r, o, 3))) continue;
+    carve(x, y, w, h);
+    rooms.push(r);
+  }
+
+  // --- corredores: cadeia + 2 atalhos (loops) ---
+  for (let i = 1; i < rooms.length; i++) connect(rooms[i - 1], rooms[i]);
+  for (let i = 0; i < 2 && rooms.length > 3; i++)
+    connect(rooms[rng() * rooms.length | 0], rooms[rng() * rooms.length | 0]);
+
+  // --- jogador na sala 0 ---
+  const start = roomCenter(rooms[0]);
+  player.x = start.x; player.y = start.y;
+
+  // --- saída na sala mais distante ---
+  let far = 1, fd = -1;
+  for (let i = 1; i < rooms.length; i++) {
+    const c = roomCenter(rooms[i]);
+    const d = Math.hypot(c.x - start.x, c.y - start.y);
+    if (d > fd) { fd = d; far = i; }
+  }
+  const ec = roomCenter(rooms[far]);
+  exitP = { x: ec.x, y: ec.y, active: false };
+
+  // --- anomalias (3) em salas distintas, nem inicial nem da saída ---
+  const pool = rooms.map((_, i) => i).filter(i => i !== 0 && i !== far);
+  for (let i = pool.length - 1; i > 0; i--) {
+    const j = rng() * (i + 1) | 0; [pool[i], pool[j]] = [pool[j], pool[i]];
+  }
+  const nAnom = 3;
+  for (let i = 0; i < nAnom; i++) {
+    const r = rooms[pool[i % pool.length]];
+    const p = randInRoom(r);
+    anomalies.push({ x: p.x, y: p.y, captured: false });
+  }
+
+  // --- refis de filme: cada vez mais raros (some a partir da noite 7) ---
+  const nFilm = Math.max(0, 4 - Math.ceil(level / 2));
+  for (let i = 0; i < nFilm; i++) {
+    const r = rooms[1 + (rng() * (rooms.length - 1) | 0)];
+    const p = randInRoom(r);
+    filmPickups.push({ x: p.x, y: p.y });
+  }
+
+  // --- fantasmas em salas longe do jogador ---
+  const nGhost = Math.min(4 + level, 9);
+  for (let i = 0; i < nGhost; i++) ghosts.push(spawnGhost());
+
+  flashT = 0; flashCd = 0; attractT = 0; eventT = 10 + rng() * 15;
+}
+
+function spawnGhost() {
+  for (let t = 0; t < 40; t++) {
+    const r = rooms[1 + (rng() * (rooms.length - 1) | 0)];
+    const p = randInRoom(r);
+    if (Math.hypot(p.x - player.x, p.y - player.y) > 28)
+      return { x: p.x, y: p.y, wx: p.x, wy: p.y, chase: false,
+               respawn: 0, bob: rng() * 6.28, artSeed: rng(), sprCv: null };
+  }
+  const r = rooms[rooms.length - 1], p = randInRoom(r);
+  return { x: p.x, y: p.y, wx: p.x, wy: p.y, chase: false, respawn: 0, bob: 0,
+           artSeed: rng(), sprCv: null };
+}
+
+// ==================================================================
+// LINHA DE VISÃO (DDA simples célula a célula)
+// ==================================================================
+function hasLOS(x0, y0, x1, y1) {
+  const d = Math.hypot(x1 - x0, y1 - y0);
+  const steps = Math.ceil(d * 2);
+  for (let i = 1; i < steps; i++) {
+    const t = i / steps;
+    if (isWall((x0 + (x1 - x0) * t) | 0, (y0 + (y1 - y0) * t) | 0)) return false;
+  }
+  return true;
+}
+
+// ==================================================================
+// LUZ (top-down)
+// ==================================================================
+function castLight(px, py, dir, halfAngle, range, power, rays) {
+  const step = 0.5;
+  for (let i = 0; i < rays; i++) {
+    const rel = rays > 1 ? (i / (rays - 1)) * 2 - 1 : 0;
+    const a = dir + rel * halfAngle;
+    const angFall = 1 - rel * rel;
+    const dx = Math.cos(a), dy = Math.sin(a);
+    for (let d = 0; d < range; d += step) {
+      const cx = (px + dx * d) | 0, cy = (py + dy * d) | 0;
+      if (cx < 0 || cy < 0 || cx >= COLS || cy >= ROWS) break;
+      const distFall = Math.pow(1 - d / range, 1.6);
+      const v = power * angFall * distFall;
+      const idx = cy * COLS + cx;
+      if (v > light[idx]) light[idx] = v;
+      if (grid[idx] === 1) break;
+    }
+  }
+}
+
+function addGlow(gx, gy, r, p) {
+  const x0 = Math.max(0, (gx - r) | 0), x1 = Math.min(COLS - 1, (gx + r) | 0);
+  const y0 = Math.max(0, (gy - r) | 0), y1 = Math.min(ROWS - 1, (gy + r) | 0);
+  for (let cy = y0; cy <= y1; cy++)
+    for (let cx = x0; cx <= x1; cx++) {
+      const d = Math.hypot(cx + 0.5 - gx, cy + 0.5 - gy);
+      if (d > r) continue;
+      const v = p * (1 - d / r);
+      const idx = cy * COLS + cx;
+      if (v > light[idx]) light[idx] = v;
+    }
+}
+
+function lightAt(x, y) {
+  const cx = x | 0, cy = y | 0;
+  if (cx < 0 || cy < 0 || cx >= COLS || cy >= ROWS) return 0;
+  return light[cy * COLS + cx];
+}
+
+// ==================================================================
+// ÁUDIO (100% sintetizado, sem assets)
+// ==================================================================
+let AC = null, master = null;
+
+function initAudio() {
+  if (AC) return;
+  try {
+    AC = new (window.AudioContext || window.webkitAudioContext)();
+    master = AC.createGain(); master.gain.value = 0.55;
+    master.connect(AC.destination);
+
+    // drone grave contínuo
+    const g = AC.createGain(); g.gain.value = 0.05;
+    const lp = AC.createBiquadFilter(); lp.type = "lowpass"; lp.frequency.value = 180;
+    const o1 = AC.createOscillator(); o1.type = "triangle"; o1.frequency.value = 48;
+    const o2 = AC.createOscillator(); o2.type = "sine";     o2.frequency.value = 48.7;
+    o1.connect(lp); o2.connect(lp); lp.connect(g); g.connect(master);
+    // respiração lenta do drone
+    const lfo = AC.createOscillator(); lfo.frequency.value = 0.07;
+    const lfoG = AC.createGain(); lfoG.gain.value = 0.03;
+    lfo.connect(lfoG); lfoG.connect(g.gain);
+    o1.start(); o2.start(); lfo.start();
+  } catch (e) { /* sem áudio, segue o jogo */ }
+}
+
+function noiseBuf(sec) {
+  const b = AC.createBuffer(1, AC.sampleRate * sec, AC.sampleRate);
+  const d = b.getChannelData(0);
+  for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+  return b;
+}
+function envGain(v0, t1) {
+  const g = AC.createGain();
+  g.gain.setValueAtTime(v0, AC.currentTime);
+  g.gain.exponentialRampToValueAtTime(0.0001, AC.currentTime + t1);
+  g.connect(master);
+  return g;
+}
+function sfxCamera() {
+  if (!AC) return;
+  const o = AC.createOscillator(); o.type = "square"; o.frequency.value = 900;
+  o.connect(envGain(0.12, 0.05)); o.start(); o.stop(AC.currentTime + 0.05);
+  const n = AC.createBufferSource(); n.buffer = noiseBuf(0.25);
+  const f = AC.createBiquadFilter(); f.type = "highpass"; f.frequency.value = 2000;
+  n.connect(f); f.connect(envGain(0.2, 0.25)); n.start();
+}
+function sfxDry() {
+  if (!AC) return;
+  const o = AC.createOscillator(); o.type = "square"; o.frequency.value = 300;
+  o.connect(envGain(0.06, 0.04)); o.start(); o.stop(AC.currentTime + 0.04);
+}
+function sfxPickup() {
+  if (!AC) return;
+  const o = AC.createOscillator(); o.type = "sine";
+  o.frequency.setValueAtTime(500, AC.currentTime);
+  o.frequency.linearRampToValueAtTime(760, AC.currentTime + 0.12);
+  o.connect(envGain(0.12, 0.18)); o.start(); o.stop(AC.currentTime + 0.18);
+}
+function sfxDissolve() {
+  if (!AC) return;
+  const n = AC.createBufferSource(); n.buffer = noiseBuf(0.6);
+  const f = AC.createBiquadFilter(); f.type = "bandpass"; f.Q.value = 4;
+  f.frequency.setValueAtTime(2200, AC.currentTime);
+  f.frequency.exponentialRampToValueAtTime(120, AC.currentTime + 0.55);
+  n.connect(f); f.connect(envGain(0.25, 0.6)); n.start();
+}
+function sfxSting() {
+  if (!AC) return;
+  [55, 58.3, 82.4].forEach(fr => {
+    const o = AC.createOscillator(); o.type = "sawtooth"; o.frequency.value = fr;
+    const lp = AC.createBiquadFilter(); lp.type = "lowpass"; lp.frequency.value = 500;
+    o.connect(lp); lp.connect(envGain(0.09, 1.2));
+    o.start(); o.stop(AC.currentTime + 1.2);
+  });
+}
+function sfxHeart(vol) {
+  if (!AC) return;
+  for (const dt of [0, 0.14]) {
+    const o = AC.createOscillator(); o.type = "sine"; o.frequency.value = 55;
+    const g = AC.createGain();
+    g.gain.setValueAtTime(0, AC.currentTime + dt);
+    g.gain.linearRampToValueAtTime(vol, AC.currentTime + dt + 0.02);
+    g.gain.exponentialRampToValueAtTime(0.0001, AC.currentTime + dt + 0.12);
+    o.connect(g); g.connect(master);
+    o.start(AC.currentTime + dt); o.stop(AC.currentTime + dt + 0.15);
+  }
+}
+function sfxWhisper() {
+  if (!AC) return;
+  const n = AC.createBufferSource(); n.buffer = noiseBuf(1.0);
+  const f = AC.createBiquadFilter(); f.type = "bandpass"; f.Q.value = 1.5;
+  f.frequency.setValueAtTime(500 + Math.random() * 600, AC.currentTime);
+  f.frequency.linearRampToValueAtTime(300, AC.currentTime + 1.0);
+  n.connect(f); f.connect(envGain(0.07, 1.0)); n.start();
+}
+function sfxDamage() {
+  if (!AC) return;
+  const n = AC.createBufferSource(); n.buffer = noiseBuf(0.3);
+  const f = AC.createBiquadFilter(); f.type = "lowpass"; f.frequency.value = 400;
+  n.connect(f); f.connect(envGain(0.3, 0.3)); n.start();
+}
+function sfxDeath() {
+  if (!AC) return;
+  const o = AC.createOscillator(); o.type = "sawtooth";
+  o.frequency.setValueAtTime(200, AC.currentTime);
+  o.frequency.exponentialRampToValueAtTime(30, AC.currentTime + 2);
+  const lp = AC.createBiquadFilter(); lp.type = "lowpass"; lp.frequency.value = 600;
+  o.connect(lp); lp.connect(envGain(0.25, 2)); o.start(); o.stop(AC.currentTime + 2);
+}
+
+// ==================================================================
+// ENTRADA
+// ==================================================================
+window.addEventListener("keydown", e => {
+  if (["ArrowUp","ArrowDown","ArrowLeft","ArrowRight","Space"].includes(e.code))
+    e.preventDefault();
+
+  if (state === "intro") {
+    if (e.code === "Enter" || e.code === "Space") startGame();
+    return;
+  }
+  if (state === "dead" && e.code === "Enter") { retry(); return; }
+
+  if (e.code === "KeyF") {
+    if (state === "play") { state = "album"; albumIdx = Math.max(0, album.length - 1); }
+    else if (state === "album") state = "play";
+    return;
+  }
+  if (state === "album") {
+    if (e.code === "Escape") state = "play";
+    if (e.code === "ArrowLeft"  && albumIdx > 0) albumIdx--;
+    if (e.code === "ArrowRight" && albumIdx < album.length - 1) albumIdx++;
+    return;
+  }
+  keys.add(e.code);
+});
+window.addEventListener("keyup", e => keys.delete(e.code));
+
+canvas.addEventListener("mousemove", e => {
+  const r = canvas.getBoundingClientRect();
+  mouse.x = (e.clientX - r.left) * (canvas.width / r.width);
+  mouse.y = (e.clientY - r.top) * (canvas.height / r.height);
+});
+canvas.addEventListener("contextmenu", e => e.preventDefault());
+canvas.addEventListener("mousedown", e => {
+  if (state === "intro") { startGame(); return; }
+  if (state !== "play") return;
+  if (e.button === 2) takePhoto();
+});
+
+function aimAngle() {
+  return Math.atan2(mouse.y - player.y * CELL, mouse.x - player.x * CELL);
+}
+
+// ------------------------------------------------------------------
+// TOQUE (celular): esquerda = joystick, direita = mirar, botões na tela
+// ------------------------------------------------------------------
+const touchUI = { seen: false, joyId: null, bx: 0, by: 0, jx: 0, jy: 0, aimId: null };
+const BTN_PHOTO = { x: 1085, y: 555, r: 52 };
+const BTN_ALBUM = { x: 1130, y: 62, r: 36 };
+
+function tcoord(t) {
+  const rct = canvas.getBoundingClientRect();
+  return {
+    x: (t.clientX - rct.left) * (canvas.width / rct.width),
+    y: (t.clientY - rct.top) * (canvas.height / rct.height),
+  };
+}
+
+canvas.addEventListener("touchstart", e => {
+  e.preventDefault();
+  touchUI.seen = true;
+  for (const t of e.changedTouches) {
+    const p = tcoord(t);
+    if (state === "intro") { startGame(); return; }
+    if (state === "dead") { retry(); return; }
+    if (state === "album") {
+      if (album.length && p.x > canvas.width * 0.66)
+        albumIdx = Math.min(album.length - 1, albumIdx + 1);
+      else if (album.length && p.x < canvas.width * 0.33 && albumIdx > 0) albumIdx--;
+      else state = "play";
+      return;
+    }
+    if (Math.hypot(p.x - BTN_PHOTO.x, p.y - BTN_PHOTO.y) < BTN_PHOTO.r + 16) {
+      takePhoto(); continue;
+    }
+    if (Math.hypot(p.x - BTN_ALBUM.x, p.y - BTN_ALBUM.y) < BTN_ALBUM.r + 16) {
+      state = "album"; albumIdx = Math.max(0, album.length - 1); continue;
+    }
+    if (p.x < canvas.width * 0.42 && touchUI.joyId === null) {
+      touchUI.joyId = t.identifier;
+      touchUI.bx = p.x; touchUI.by = p.y;
+      touchUI.jx = 0; touchUI.jy = 0;
+    } else if (touchUI.aimId === null) {
+      touchUI.aimId = t.identifier;
+      mouse.x = p.x; mouse.y = p.y;
+    }
+  }
+}, { passive: false });
+
+canvas.addEventListener("touchmove", e => {
+  e.preventDefault();
+  for (const t of e.changedTouches) {
+    const p = tcoord(t);
+    if (t.identifier === touchUI.joyId) {
+      const dx = p.x - touchUI.bx, dy = p.y - touchUI.by;
+      const d = Math.hypot(dx, dy) || 1;
+      const cl = Math.min(d, 55);
+      touchUI.jx = dx / d * (cl / 55);
+      touchUI.jy = dy / d * (cl / 55);
+    } else if (t.identifier === touchUI.aimId) {
+      mouse.x = p.x; mouse.y = p.y;
+    }
+  }
+}, { passive: false });
+
+function touchEnd(e) {
+  e.preventDefault();
+  for (const t of e.changedTouches) {
+    if (t.identifier === touchUI.joyId) { touchUI.joyId = null; touchUI.jx = 0; touchUI.jy = 0; }
+    if (t.identifier === touchUI.aimId) touchUI.aimId = null;
+  }
+}
+canvas.addEventListener("touchend", touchEnd, { passive: false });
+canvas.addEventListener("touchcancel", touchEnd, { passive: false });
+
+function startGame() { initAudio(); genLevel(); state = "play"; }
+function retry() { sanity = 100; film = FILM_START; seed = (seed + 1337) | 0; genLevel(); state = "play"; }
+
+// ==================================================================
+// FOTO (mecânica + render 3D)
+// ==================================================================
+function inFlashCone(ex, ey, dir) {
+  const dx = ex - player.x, dy = ey - player.y;
+  const d = Math.hypot(dx, dy);
+  if (d > FLASH.range * 0.85) return false;
+  let da = Math.atan2(dy, dx) - dir;
+  while (da > Math.PI) da -= 2 * Math.PI;
+  while (da < -Math.PI) da += 2 * Math.PI;
+  if (Math.abs(da) > FLASH.halfAngle * 0.95) return false;
+  return hasLOS(player.x, player.y, ex, ey);
+}
+
+function takePhoto() {
+  if (flashCd > 0) return;
+  if (film <= 0) { sfxDry(); return; }
+  film--;
+  flashT = 1; flashCd = FLASH.cooldown;
+  flashDir = aimAngle();
+  attractT = 7;                       // o clarão chama atenção...
+  sfxCamera();
+
+  // renderiza a foto ANTES de marcar capturas/dissolver
+  // (a anomalia sai viva e vermelha na foto; o fantasma sai inteiro)
+  photoCount++;
+  const toCapture = anomalies.filter(a => !a.captured && inFlashCone(a.x, a.y, flashDir));
+
+  const cv = renderPhoto(player.x, player.y, flashDir, toCapture.length > 0);
+  album.push({ cv, caption: `FOTO ${photoCount} — NOITE ${level}` });
+  if (album.length > ALBUM_MAX) album.shift();
+
+  for (const a of toCapture) a.captured = true;
+  if (toCapture.length > 0) {
+    sfxSting();
+    if (anomalies.every(a => a.captured)) {
+      exitP.active = true;
+      announceText = "A PORTA APARECEU";
+      announceT = 5;
+    }
+  }
+
+  // dissolve fantasmas no cone
+  for (const g of ghosts) {
+    if (g.respawn > 0) continue;
+    if (inFlashCone(g.x, g.y, flashDir)) {
+      g.respawn = 10 + rng() * 6;
+      g.chase = false;
+      sfxDissolve();
+      for (let i = 0; i < 26; i++) {
+        const a = rng() * 6.28, s = 4 + rng() * 14;
+        particles.push({
+          x: g.x, y: g.y, vx: Math.cos(a) * s, vy: Math.sin(a) * s,
+          life: 0.7, ch: "Ψ*·:"[rng() * 4 | 0],
+        });
+      }
+    }
+  }
+}
+
+// --- renderizador 3D em ASCII (raycaster estilo Wolfenstein) ---
+
+// Sprites de alta qualidade (fora do estilo ASCII, de propósito):
+// o fantasma e a anomalia "furam" a estética do cenário na foto.
+// ------------------------------------------------------------------
+// FANTASMA — estilo "desenho a caneta" da referência do usuário:
+// crânio pálido de hachura densa, olhos = buracos negros com aro
+// branco rabiscado, boca pequena e torta, cabelo em fios, mãos
+// esqueléticas de dedos compridos. O corpo nunca aparece inteiro:
+// a criatura emerge do chão ou atravessa uma "parede invisível".
+// ------------------------------------------------------------------
+function makeGhostSprite(n) {
+  const r = mulberry32((n * 1e9) | 0);
+  const v = r();
+  if (v < 0.30) return ghostPeek(r);    // réplica da referência: cabeça + mão(s)
+  if (v < 0.55) return ghostFloor(r);   // emergindo do chão, mãos fincadas
+  if (v < 0.75) return ghostReach(r);   // braço comprido atravessando o nada
+  return ghostBody(r);                  // corpo inteiro distorcido, com pernas
+}
+
+function penTools(g, r) {
+  function pen(x0, y0, x1, y1, alpha, lw) {
+    g.strokeStyle = `rgba(226,226,233,${alpha})`;
+    g.lineWidth = lw;
+    g.beginPath(); g.moveTo(x0, y0);
+    g.quadraticCurveTo((x0 + x1) / 2 + (r() - 0.5) * 3,
+                       (y0 + y1) / 2 + (r() - 0.5) * 3, x1, y1);
+    g.stroke();
+  }
+  function dark(x0, y0, x1, y1, alpha, lw) {
+    g.strokeStyle = `rgba(2,2,4,${alpha})`;
+    g.lineWidth = lw;
+    g.beginPath(); g.moveTo(x0, y0);
+    g.quadraticCurveTo((x0 + x1) / 2 + (r() - 0.5) * 3,
+                       (y0 + y1) / 2 + (r() - 0.5) * 3, x1, y1);
+    g.stroke();
+  }
+
+  // crânio completo, centrado em (cx,cy), raio R, levemente inclinado
+  function skull(cx, cy, R, tilt) {
+    g.save();
+    g.translate(cx, cy);
+    g.rotate(tilt);
+
+    // silhueta da cabeça: UMA forma irregular (bolhas redondas viram desenho animado)
+    g.fillStyle = "rgba(4,4,6,0.94)";
+    const phase = r() * 6.28, phase2 = r() * 6.28;
+    g.beginPath();
+    const npts = 34;
+    for (let i = 0; i <= npts; i++) {
+      const a = i / npts * 6.283;
+      const wob = 1 + 0.09 * Math.sin(a * 3 + phase) + 0.06 * Math.sin(a * 7 + phase2);
+      const x = Math.cos(a) * R * 1.14 * wob;
+      const y = Math.sin(a) * R * 1.30 * wob - R * 0.05;
+      i ? g.lineTo(x, y) : g.moveTo(x, y);
+    }
+    g.closePath(); g.fill();
+    // pescoço fino e torto descendo
+    g.beginPath();
+    g.moveTo(-R * 0.32, R * 0.95);
+    g.quadraticCurveTo(-R * 0.22, R * 1.4, -R * (0.12 + r() * 0.08), R * 1.75);
+    g.lineTo(R * (0.16 + r() * 0.08), R * 1.75);
+    g.quadraticCurveTo(R * 0.26, R * 1.35, R * 0.30, R * 0.95);
+    g.closePath(); g.fill();
+    for (let i = 0; i < 14; i++) {       // riscos no pescoço
+      const t = r();
+      pen(-R * 0.2 + r() * R * 0.4, R * (1.0 + t * 0.7),
+          -R * 0.2 + r() * R * 0.4 + (r() - 0.5) * 5, R * (1.0 + t * 0.7) + 6 + r() * 8,
+          0.08 + r() * 0.15, 0.7);
+    }
+
+    const eL = { x: -R * 0.42, y: -R * 0.08, rr: R * (0.30 + r() * 0.05) };
+    const eR = { x:  R * 0.40, y: -R * 0.10, rr: R * (0.27 + r() * 0.05) };
+
+    // base pálida do rosto (na referência o rosto é claro; os olhos é que são breu)
+    const faceRx = R * 1.02, faceRy = R * 1.18;
+    const wash = g.createRadialGradient(0, -R * 0.05, R * 0.15, 0, -R * 0.05, R * 1.1);
+    wash.addColorStop(0, "rgba(158,158,168,0.62)");
+    wash.addColorStop(0.7, "rgba(126,126,138,0.36)");
+    wash.addColorStop(1, "rgba(90,90,100,0)");
+    g.fillStyle = wash;
+    g.beginPath(); g.ellipse(0, -R * 0.05, faceRx, faceRy, 0, 0, 7); g.fill();
+
+    // pele: hachura de caneta por cima, clara no meio, morrendo nas bordas
+    for (let i = 0; i < 1100; i++) {
+      const a = r() * 6.283, rad = Math.sqrt(r());
+      const x = Math.cos(a) * rad * faceRx;
+      const y = Math.sin(a) * rad * faceRy - R * 0.05;
+      if (Math.hypot(x - eL.x, y - eL.y) < eL.rr * 1.02) continue;  // buracos intactos
+      if (Math.hypot(x - eR.x, y - eR.y) < eR.rr * 1.02) continue;
+      let b = Math.pow(1 - rad, 0.5) * (0.5 + 0.5 * r());
+      if (y > R * 0.8) b *= 0.55;                                   // queixo afunda
+      const sa = -1.05 + (r() - 0.5) * 0.5 + (r() < 0.25 ? 1.4 : 0);
+      const sl = 2.5 + r() * 4;
+      pen(x - Math.cos(sa) * sl, y - Math.sin(sa) * sl,
+          x + Math.cos(sa) * sl, y + Math.sin(sa) * sl,
+          0.07 + 0.24 * b, 0.6 + r() * 0.5);
+    }
+
+    // cabelo: fios finos caindo com gravidade, caóticos
+    for (let i = 0; i < 240; i++) {
+      const a0 = -Math.PI + r() * Math.PI;
+      let x = Math.cos(a0) * R * (0.8 + r() * 0.25);
+      let y = Math.sin(a0) * R * (0.9 + r() * 0.25) - R * 0.1;
+      let vx2 = Math.cos(a0), vy2 = Math.sin(a0);
+      g.strokeStyle = `rgba(215,215,222,${0.05 + r() * 0.2})`;
+      g.lineWidth = 0.5 + r() * 0.8;
+      g.beginPath(); g.moveTo(x, y);
+      const segs = 4 + (r() * 4 | 0);
+      for (let s2 = 0; s2 < segs; s2++) {
+        vx2 += (r() - 0.5) * 0.8;
+        vy2 += 0.5 + (r() - 0.5) * 0.4;
+        const il = 1 / Math.hypot(vx2, vy2);
+        vx2 *= il; vy2 *= il;
+        const len = R * (0.22 + r() * 0.35);
+        x += vx2 * len; y += vy2 * len;
+        g.lineTo(x, y);
+      }
+      g.stroke();
+    }
+
+    // olhos: vazios absolutos com aros brancos rabiscados
+    for (const e of [eL, eR]) {
+      const halo = g.createRadialGradient(e.x, e.y, e.rr * 0.4, e.x, e.y, e.rr * 1.5);
+      halo.addColorStop(0, "rgba(0,0,0,1)");
+      halo.addColorStop(0.75, "rgba(0,0,0,0.85)");
+      halo.addColorStop(1, "rgba(0,0,0,0)");
+      g.fillStyle = halo;
+      g.beginPath(); g.arc(e.x, e.y, e.rr * 1.5, 0, 7); g.fill();
+      g.fillStyle = "#000";
+      g.beginPath(); g.arc(e.x, e.y, e.rr, 0, 7); g.fill();
+
+      // aros RABISCADOS: muitos arcos parciais irregulares, nunca círculo limpo
+      for (let k = 0; k < 14; k++) {
+        const rad2 = e.rr * (0.98 + r() * 0.28);
+        g.strokeStyle = `rgba(232,232,240,${0.15 + r() * 0.5})`;
+        g.lineWidth = 0.6 + r() * 1.0;
+        g.beginPath();
+        const aa0 = r() * 6.28, arc = 1.2 + r() * 3.5, steps = 14;
+        for (let i2 = 0; i2 <= steps; i2++) {
+          const a = aa0 + i2 / steps * arc;
+          const rj = rad2 * (1 + (r() - 0.5) * 0.16);
+          const x = e.x + Math.cos(a) * rj, y = e.y + Math.sin(a) * rj;
+          i2 ? g.lineTo(x, y) : g.moveTo(x, y);
+        }
+        g.stroke();
+      }
+      for (let k = 0; k < 40; k++) {
+        const a = r() * 6.283;
+        const r0 = e.rr * (1.0 + r() * 0.15), r1 = r0 + 2 + r() * 6;
+        pen(e.x + Math.cos(a) * r0, e.y + Math.sin(a) * r0,
+            e.x + Math.cos(a) * r1, e.y + Math.sin(a) * r1,
+            0.12 + r() * 0.3, 0.6);
+      }
+      // sombra rabiscada afundando a órbita
+      for (let k = 0; k < 18; k++) {
+        const a = r() * 6.283;
+        const r0 = e.rr * (1.3 + r() * 0.3);
+        dark(e.x + Math.cos(a) * r0, e.y + Math.sin(a) * r0,
+             e.x + Math.cos(a) * (r0 + 4 + r() * 4), e.y + Math.sin(a) * (r0 + 4),
+             0.3, 1.2);
+      }
+    }
+
+    // nariz: quase nada — sombra e duas narinas mínimas
+    dark(0, R * 0.28, (r() - 0.5) * 3, R * 0.45, 0.5, 2.5);
+    g.fillStyle = "rgba(0,0,0,0.75)";
+    g.beginPath(); g.ellipse(-R * 0.07, R * 0.44, 2.2, 1.6, 0.3, 0, 7); g.fill();
+    g.beginPath(); g.ellipse( R * 0.06, R * 0.45, 2.2, 1.6, -0.3, 0, 7); g.fill();
+
+    // boca: varia — costurada fechada, ESCANCARADA num grito, ou rasgo largo
+    const mtype = r();
+    if (mtype < 0.38) {
+      // fechada, pequena, torta, costurada de dentes finos
+      const mw = R * (0.5 + r() * 0.15), my = R * 0.72;
+      g.save();
+      g.translate((r() - 0.5) * R * 0.1, my);
+      g.rotate((r() - 0.5) * 0.25);
+      g.fillStyle = "rgba(0,0,0,0.92)";
+      g.beginPath();
+      g.moveTo(-mw / 2, 0);
+      g.quadraticCurveTo(0, R * 0.16, mw / 2, -R * 0.02);
+      g.quadraticCurveTo(0, R * 0.05, -mw / 2, 0);
+      g.closePath(); g.fill();
+      const nT = 7 + (r() * 4 | 0);
+      for (let i2 = 0; i2 < nT; i2++) {
+        const tx2 = -mw * 0.42 + (i2 / (nT - 1)) * mw * 0.84;
+        pen(tx2, -1 + (r() - 0.5) * 2, tx2 + (r() - 0.5) * 1.5, 3.5 + r() * 3,
+            0.4 + r() * 0.35, 0.8);
+      }
+      for (let i2 = 0; i2 < 16; i2++) {
+        const tx2 = -mw / 2 + r() * mw;
+        dark(tx2, -3 + r() * 2, tx2 + (r() - 0.5) * 6, 4 + r() * 4, 0.25, 0.8);
+      }
+      g.restore();
+    } else if (mtype < 0.72) {
+      // escancarada: vazio negro vertical, grande demais, aro rabiscado como os olhos
+      const mrx = R * (0.19 + r() * 0.07), mry = R * (0.30 + r() * 0.15);
+      g.save();
+      g.translate((r() - 0.5) * R * 0.12, R * (0.58 + r() * 0.06));
+      g.rotate((r() - 0.5) * 0.25);
+      g.save(); g.scale(1, mry / mrx);
+      const mhalo = g.createRadialGradient(0, 0, mrx * 0.4, 0, 0, mrx * 1.5);
+      mhalo.addColorStop(0, "rgba(0,0,0,1)");
+      mhalo.addColorStop(0.75, "rgba(0,0,0,0.85)");
+      mhalo.addColorStop(1, "rgba(0,0,0,0)");
+      g.fillStyle = mhalo;
+      g.beginPath(); g.arc(0, 0, mrx * 1.5, 0, 7); g.fill();
+      g.fillStyle = "#000";
+      g.beginPath(); g.arc(0, 0, mrx, 0, 7); g.fill();
+      for (let k = 0; k < 10; k++) {
+        const rad2 = mrx * (0.98 + r() * 0.25);
+        g.strokeStyle = `rgba(230,230,238,${0.15 + r() * 0.45})`;
+        g.lineWidth = 0.6 + r() * 0.9;
+        g.beginPath();
+        const aa0 = r() * 6.28, arc = 1 + r() * 3, steps = 12;
+        for (let i2 = 0; i2 <= steps; i2++) {
+          const a = aa0 + i2 / steps * arc;
+          const rj = rad2 * (1 + (r() - 0.5) * 0.18);
+          i2 ? g.lineTo(Math.cos(a) * rj, Math.sin(a) * rj)
+             : g.moveTo(Math.cos(a) * rj, Math.sin(a) * rj);
+        }
+        g.stroke();
+      }
+      g.restore();
+      // dentes finos apontando para dentro do buraco
+      const nT2 = 7 + (r() * 5 | 0);
+      for (let i2 = 0; i2 < nT2; i2++) {
+        const a = r() * 6.283;
+        const ex2 = Math.cos(a) * mrx * 0.95, ey2 = Math.sin(a) * mry * 0.95;
+        const len = 3 + r() * 5;
+        pen(ex2, ey2, ex2 - Math.cos(a) * len, ey2 - Math.sin(a) * len * 0.7,
+            0.35 + r() * 0.35, 0.8);
+      }
+      g.restore();
+    } else {
+      // rasgo largo demais atravessando o rosto, cheio de dentes
+      const mw2 = R * (0.85 + r() * 0.25), mhh = R * (0.10 + r() * 0.05);
+      g.save();
+      g.translate((r() - 0.5) * R * 0.08, R * (0.60 + r() * 0.08));
+      g.rotate((r() - 0.5) * 0.18);
+      g.fillStyle = "rgba(0,0,0,0.94)";
+      g.beginPath();
+      g.moveTo(-mw2 / 2, 0);
+      g.quadraticCurveTo(0, -mhh * 1.2, mw2 / 2, (r() - 0.5) * 4);
+      g.quadraticCurveTo(0, mhh * 3.2, -mw2 / 2, 0);
+      g.closePath(); g.fill();
+      const nT3 = 14 + (r() * 6 | 0);
+      for (let i2 = 0; i2 < nT3; i2++) {
+        const t = i2 / (nT3 - 1);
+        const tx2 = -mw2 * 0.46 + t * mw2 * 0.92;
+        const topY = -mhh * (0.6 + Math.sin(t * Math.PI) * 0.5);
+        const botY = mhh * (0.7 + Math.sin(t * Math.PI) * 1.6);
+        pen(tx2, topY, tx2 + (r() - 0.5) * 2, botY, 0.4 + r() * 0.35, 0.9 + r() * 0.5);
+      }
+      for (let k = 0; k < 12; k++) {
+        const t = r();
+        const tx2 = -mw2 / 2 + t * mw2;
+        dark(tx2, -mhh - 2 + r() * 2, tx2 + (r() - 0.5) * 8, mhh * 2.5 + r() * 4, 0.3, 0.9);
+      }
+      g.restore();
+    }
+
+    g.restore();
+  }
+
+  // mão esquelética: placa óssea hachurada, fileira de nós, dedos com falanges
+  // nF = quantidade de dedos (4 a 6 deixa a anatomia "errada" na medida)
+  function hand(cx, cy, S, baseAng, curl, spread, nF) {
+    nF = nF || 5;
+    const mid = (nF - 1) / 2;
+    // dorso da mão: forma irregular pequena (nunca bola preta)
+    g.fillStyle = "rgba(4,4,6,0.92)";
+    g.beginPath();
+    for (let i = 0; i <= 10; i++) {
+      const a = i / 10 * 6.283;
+      const rr2 = S * (0.22 + (r() - 0.5) * 0.05);
+      const x = cx + Math.cos(a) * rr2 * 1.15, y = cy + Math.sin(a) * rr2 * 0.8;
+      i ? g.lineTo(x, y) : g.moveTo(x, y);
+    }
+    g.closePath(); g.fill();
+    for (let i = 0; i < 26; i++) {                     // hachura do dorso
+      const a = r() * 6.28, rad = Math.sqrt(r());
+      const x = cx + Math.cos(a) * rad * S * 0.2;
+      const y = cy + Math.sin(a) * rad * S * 0.15;
+      pen(x, y, x + (r() - 0.5) * 7, y + (r() - 0.5) * 7, 0.15 + r() * 0.25, 0.7);
+    }
+    // fileira de nós na base dos dedos
+    for (let f = 0; f < nF; f++) {
+      const fa = baseAng + (f - mid) * spread;
+      const kx = cx + Math.cos(fa) * S * 0.27, ky = cy + Math.sin(fa) * S * 0.22;
+      g.strokeStyle = `rgba(232,232,240,${0.5 + r() * 0.3})`;
+      g.lineWidth = 1.2;
+      g.beginPath(); g.arc(kx, ky, S * 0.05, fa - 2.6, fa - 0.5); g.stroke();
+    }
+    // dedos: falanges GROSSAS com osso claro dos dois lados, ruga na junta, garra
+    for (let f = 0; f < nF; f++) {
+      const fa = baseAng + (f - mid) * spread + (r() - 0.5) * 0.08;
+      const flen = S * (0.62 + 0.38 * Math.sin((f + 0.5) / nF * Math.PI))
+                     * (0.9 + r() * 0.3);
+      let x = cx + Math.cos(fa) * S * 0.27;
+      let y = cy + Math.sin(fa) * S * 0.22;
+      let ang = fa;
+      const segLen = [flen * 0.42, flen * 0.33, flen * 0.27];
+      for (let s2 = 0; s2 < 3; s2++) {
+        ang += curl * (0.45 + s2 * 0.45) + (r() - 0.5) * 0.1;
+        const nx = x + Math.cos(ang) * segLen[s2];
+        const ny = y + Math.sin(ang) * segLen[s2];
+        const th = S * (0.095 - s2 * 0.022);
+        g.strokeStyle = "rgba(3,3,5,0.92)";
+        g.lineWidth = th + 1.5;
+        g.lineCap = "round";
+        g.beginPath(); g.moveTo(x, y); g.lineTo(nx, ny); g.stroke();
+        const px2 = -Math.sin(ang), py2 = Math.cos(ang);
+        for (const off of [-th * 0.45, th * 0.45])
+          pen(x + px2 * off, y + py2 * off, nx + px2 * off, ny + py2 * off,
+              0.5 + r() * 0.3, 1.3);
+        // ruga da junta atravessando o dedo
+        pen(nx - px2 * th * 0.7, ny - py2 * th * 0.7,
+            nx + px2 * th * 0.7, ny + py2 * th * 0.7, 0.55 + r() * 0.3, 1.1);
+        x = nx; y = ny;
+      }
+      const ca = ang + curl * 1.2;
+      const clen = S * (0.17 + r() * 0.08);
+      g.strokeStyle = `rgba(240,240,246,${0.7 + r() * 0.25})`;
+      g.lineWidth = 1.5;
+      g.beginPath(); g.moveTo(x, y);
+      g.quadraticCurveTo(x + Math.cos(ang) * clen * 0.7, y + Math.sin(ang) * clen * 0.7,
+                         x + Math.cos(ca) * clen, y + Math.sin(ca) * clen);
+      g.stroke();
+    }
+  }
+
+  // braço ossudo: núcleo escuro FINO + linhas de osso tremidas + dobras
+  function arm(x0, y0, x1, y1, x2, y2, thick) {
+    function bez(t) {
+      return [(1 - t) * (1 - t) * x0 + 2 * (1 - t) * t * x1 + t * t * x2,
+              (1 - t) * (1 - t) * y0 + 2 * (1 - t) * t * y1 + t * t * y2];
+    }
+    g.strokeStyle = "rgba(3,3,5,0.92)";
+    g.lineWidth = thick;
+    g.lineCap = "round";
+    g.beginPath(); g.moveTo(x0, y0);
+    g.quadraticCurveTo(x1, y1, x2, y2); g.stroke();
+    for (let k = 0; k < 3; k++) {
+      const off = (k - 1) * thick * 0.35;
+      let p = bez(0);
+      for (let t = 0.2; t <= 1.001; t += 0.2) {
+        const q = bez(t);
+        pen(p[0] + off + (r() - 0.5) * 2, p[1], q[0] + off + (r() - 0.5) * 2, q[1],
+            0.3 + r() * 0.3, 1.0);
+        p = q;
+      }
+    }
+    for (let k = 0; k < 6; k++) {          // dobras transversais
+      const p = bez(r());
+      pen(p[0] - 3 - r() * 3, p[1] + (r() - 0.5) * 4,
+          p[0] + 3 + r() * 3, p[1] + (r() - 0.5) * 4, 0.25 + r() * 0.2, 0.8);
+    }
+  }
+
+  // garras avulsas (pés, pontas)
+  function claws(x, y, dir, len, n2) {
+    for (let f = 0; f < n2; f++) {
+      const a = dir + (f - (n2 - 1) / 2) * 0.3 + (r() - 0.5) * 0.15;
+      const l2 = len * (0.7 + r() * 0.6);
+      g.strokeStyle = `rgba(238,238,245,${0.55 + r() * 0.3})`;
+      g.lineWidth = 1.3;
+      g.beginPath(); g.moveTo(x, y);
+      g.quadraticCurveTo(x + Math.cos(a) * l2 * 0.6, y + Math.sin(a) * l2 * 0.6 + 2,
+                         x + Math.cos(a) * l2, y + Math.sin(a) * l2 + 3);
+      g.stroke();
+    }
+  }
+
+  // tronco distorcido: silhueta irregular torta + hachura + costelas (sem bolhas)
+  function torso(cx, y0, y1, wTop, wBot, bend) {
+    g.fillStyle = "rgba(4,4,6,0.94)";
+    g.beginPath();
+    const steps = 9;
+    for (let i = 0; i <= steps; i++) {
+      const t = i / steps;
+      const y = y0 + (y1 - y0) * t;
+      const xoff = Math.sin(t * Math.PI) * bend;
+      const w2 = wTop + (wBot - wTop) * t;
+      const x = cx + xoff - w2 / 2 * (1 + (r() - 0.5) * 0.25);
+      i ? g.lineTo(x, y) : g.moveTo(x, y);
+    }
+    for (let i = steps; i >= 0; i--) {
+      const t = i / steps;
+      const y = y0 + (y1 - y0) * t;
+      const xoff = Math.sin(t * Math.PI) * bend;
+      const w2 = wTop + (wBot - wTop) * t;
+      g.lineTo(cx + xoff + w2 / 2 * (1 + (r() - 0.5) * 0.25), y);
+    }
+    g.closePath(); g.fill();
+    // pele do tronco: hachura mais apagada que o rosto
+    for (let i = 0; i < 260; i++) {
+      const t = r();
+      const y = y0 + (y1 - y0) * t;
+      const xoff = Math.sin(t * Math.PI) * bend;
+      const w2 = (wTop + (wBot - wTop) * t) * 0.5;
+      const x = cx + xoff + (r() * 2 - 1) * w2 * 0.85;
+      const sa = -1.05 + (r() - 0.5) * 0.6;
+      const sl = 2 + r() * 4;
+      pen(x - Math.cos(sa) * sl, y - Math.sin(sa) * sl,
+          x + Math.cos(sa) * sl, y + Math.sin(sa) * sl,
+          0.04 + r() * 0.13, 0.6);
+    }
+    // costelas insinuadas
+    for (let k = 0; k < 5; k++) {
+      const t = 0.16 + k * 0.13;
+      const y = y0 + (y1 - y0) * t;
+      const xoff = Math.sin(t * Math.PI) * bend;
+      const w2 = (wTop + (wBot - wTop) * t) * 0.42;
+      pen(cx + xoff - w2, y + r() * 3, cx + xoff + w2, y - 2 + r() * 4,
+          0.18 + r() * 0.2, 0.9);
+    }
+  }
+
+  return { pen, dark, skull, hand, arm, claws, torso };
+}
+
+// réplica da referência: cabeça inclinada, mão ossuda alcançando abaixo
+function ghostPeek(r) {
+  const w = 210, h = 300;
+  const cv = document.createElement("canvas");
+  cv.width = w; cv.height = h;
+  const g = cv.getContext("2d");
+  g.lineCap = "round";
+  const T = penTools(g, r);
+  const R = 52 + r() * 6;
+  const hx = w * 0.5 + (r() - 0.5) * 14;
+  T.skull(hx, h * 0.30, R, (r() - 0.5) * 0.22);
+  // braço saindo do ombro (lado), dobrando no cotovelo até a mão
+  const hwx = w * (0.60 + r() * 0.08), hwy = h * (0.72 + r() * 0.04);
+  T.arm(hx + R * 0.55, h * 0.47, w * 0.78, h * 0.58, hwx + 4, hwy - 10, 5.5);
+  T.hand(hwx, hwy, 56 + r() * 10,
+         Math.PI * (0.42 + r() * 0.12), 0.30 + r() * 0.16, 0.28, 4 + (r() * 3 | 0));
+  if (r() < 0.5) {   // às vezes a segunda mão surge do outro lado
+    const h2x = w * (0.24 + r() * 0.06), h2y = h * (0.66 + r() * 0.06);
+    T.arm(hx - R * 0.55, h * 0.46, w * 0.16, h * 0.56, h2x - 4, h2y - 10, 5);
+    T.hand(h2x, h2y, 46 + r() * 10,
+           Math.PI * (0.55 + r() * 0.1), 0.12 + r() * 0.25, 0.30, 4 + (r() * 3 | 0));
+  }
+  cv._aspect = 0.70; cv._hscale = 0.95;
+  return cv;
+}
+
+// emergindo do chão: cabeça + duas mãos fincadas puxando o corpo
+function ghostFloor(r) {
+  const w = 250, h = 200;
+  const cv = document.createElement("canvas");
+  cv.width = w; cv.height = h;
+  const g = cv.getContext("2d");
+  g.lineCap = "round";
+  const T = penTools(g, r);
+  const R = 46 + r() * 6;
+  T.skull(w * 0.5 + (r() - 0.5) * 12, h * 0.42, R, (r() - 0.5) * 0.3);
+  T.hand(w * 0.17 + r() * 8, h * 0.80, 42 + r() * 8,
+         Math.PI * 0.55, 0.3 + r() * 0.2, 0.24, 4 + (r() * 3 | 0));
+  T.hand(w * 0.83 - r() * 8, h * 0.78, 42 + r() * 8,
+         Math.PI * 0.45, -(0.3 + r() * 0.2), 0.24, 4 + (r() * 3 | 0));
+  // chão riscado onde ela rasga a saída
+  for (let i = 0; i < 40; i++) {
+    const x = w * 0.15 + r() * w * 0.7, y = h * (0.92 + r() * 0.06);
+    T.pen(x, y, x + (r() - 0.5) * 30, y + (r() - 0.5) * 3, 0.1 + r() * 0.25, 0.7);
+  }
+  cv._aspect = 1.15; cv._hscale = 0.60;
+  return cv;
+}
+
+// atravessando a parede invisível: cabeça e um braço comprido demais
+function ghostReach(r) {
+  const w = 200, h = 310;
+  const cv = document.createElement("canvas");
+  cv.width = w; cv.height = h;
+  const g = cv.getContext("2d");
+  g.lineCap = "round";
+  const T = penTools(g, r);
+  const R = 46 + r() * 5;
+  T.skull(w * 0.42, h * 0.24, R, (r() - 0.5) * 0.35);
+  // pescoço/ombro dissolvendo em fios verticais
+  for (let i = 0; i < 60; i++) {
+    const x = w * (0.3 + r() * 0.35);
+    const y = h * (0.38 + r() * 0.08);
+    T.pen(x, y, x + (r() - 0.5) * 10, y + h * (0.1 + r() * 0.25),
+          0.05 + r() * 0.15, 0.6);
+  }
+  // braço ossudo do ombro em curva até a mão enorme
+  const ax2 = w * (0.52 + r() * 0.1), ay2 = h * 0.74;
+  T.arm(w * 0.55, h * 0.42, w * (0.74 + r() * 0.06), h * 0.58, ax2, ay2, 6);
+  T.hand(ax2, ay2 + 12, 60 + r() * 10,
+         Math.PI * (0.45 + r() * 0.1), 0.28 + r() * 0.18, 0.28, 4 + (r() * 3 | 0));
+  cv._aspect = 0.62; cv._hscale = 1.0;
+  return cv;
+}
+
+// corpo inteiro distorcido: tronco torto rabiscado, dois braços, pernas ossudas
+function ghostBody(r) {
+  const w = 220, h = 340;
+  const cv = document.createElement("canvas");
+  cv.width = w; cv.height = h;
+  const g = cv.getContext("2d");
+  g.lineCap = "round";
+  const T = penTools(g, r);
+  const R = 40 + r() * 5;
+  const bend = (r() - 0.5) * w * 0.26;            // torção lateral da coluna
+  const hx = w * 0.5 + (r() - 0.5) * 10, hy = h * 0.155;
+
+  // pernas atrás do tronco: finas, tortas, joelhos para fora
+  const hipY = h * 0.60;
+  const hipX = hx + bend * 0.9;
+  const fL = { x: hipX - w * (0.06 + r() * 0.05), y: h * (0.94 + r() * 0.03) };
+  const fR = { x: hipX + w * (0.05 + r() * 0.05), y: h * (0.95 + r() * 0.02) };
+  T.arm(hipX - R * 0.35, hipY, hipX - w * (0.14 + r() * 0.04), h * 0.78, fL.x, fL.y, 5);
+  T.claws(fL.x, fL.y, Math.PI * 0.5, 8, 3);
+  T.arm(hipX + R * 0.35, hipY, hipX + w * (0.15 + r() * 0.04), h * 0.80, fR.x, fR.y, 5);
+  T.claws(fR.x, fR.y, Math.PI * 0.5, 8, 3);
+
+  // tronco torto (rabisco, sem bolhas)
+  T.torso(hx, h * 0.235, h * 0.62, R * 1.5, R * 0.95, bend);
+
+  // braços compridos com mãos variadas
+  const hLx = hx - w * (0.27 + r() * 0.05), hLy = h * (0.52 + r() * 0.12);
+  const hRx = hx + w * (0.28 + r() * 0.05), hRy = h * (0.48 + r() * 0.14);
+  T.arm(hx - R * 0.75, h * 0.285, hx - w * 0.30, h * 0.40, hLx, hLy, 5);
+  T.hand(hLx, hLy + 8, 34 + r() * 10,
+         Math.PI * (0.5 + (r() - 0.5) * 0.25), 0.14 + r() * 0.3, 0.3, 4 + (r() * 3 | 0));
+  T.arm(hx + R * 0.75, h * 0.285, hx + w * 0.33, h * 0.42, hRx, hRy, 5);
+  T.hand(hRx, hRy + 8, 34 + r() * 10,
+         Math.PI * (0.5 + (r() - 0.5) * 0.25), 0.14 + r() * 0.3, 0.3, 4 + (r() * 3 | 0));
+
+  // cabeça por cima de tudo, caída/torta
+  T.skull(hx, hy, R, (r() - 0.5) * 0.4);
+
+  cv._aspect = 0.65; cv._hscale = 1.12;
+  return cv;
+}
+
+// pool de criaturas pré-geradas na abertura (uma a cada 40ms, sem travar
+// o carregamento); a foto só sorteia do pool — custo zero na hora do clique
+const GHOST_POOL = [];
+const GHOST_POOL_N = 12;
+(function warmGhostPool() {
+  if (GHOST_POOL.length >= GHOST_POOL_N) return;
+  GHOST_POOL.push(makeGhostSprite((GHOST_POOL.length + Math.random()) / GHOST_POOL_N));
+  setTimeout(warmGhostPool, 40);
+})();
+function ghostSprite(seed) {
+  if (GHOST_POOL.length) return GHOST_POOL[(seed * GHOST_POOL.length) | 0];
+  return makeGhostSprite(seed);
+}
+
+let FILM_SPR = null, EXIT_SPR = null, GLOW_SPR = null;
+let VHS_S = null, RS_S = null;   // buffers reutilizados (evita pausas de GC)
+
+// clarão do flash estourando na criatura (modo realista)
+function makeGlowSprite() {
+  const s = 128;
+  const cv = document.createElement("canvas");
+  cv.width = s; cv.height = s;
+  const g = cv.getContext("2d");
+  const rad = g.createRadialGradient(s / 2, s / 2, 4, s / 2, s / 2, s / 2 - 2);
+  rad.addColorStop(0, "rgba(255,250,235,0.60)");
+  rad.addColorStop(0.6, "rgba(255,250,235,0.22)");
+  rad.addColorStop(1, "rgba(255,250,235,0)");
+  g.fillStyle = rad; g.fillRect(0, 0, s, s);
+  return cv;
+}
+
+function makeFilmSprite() {
+  const s = 120;
+  const cv = document.createElement("canvas");
+  cv.width = s; cv.height = s;
+  const g = cv.getContext("2d");
+  const c = s / 2;
+
+  // brilho esverdeado suave
+  const rad = g.createRadialGradient(c, c, 2, c, c, c * 0.9);
+  rad.addColorStop(0, "rgba(180,230,180,0.30)");
+  rad.addColorStop(1, "rgba(180,230,180,0)");
+  g.fillStyle = rad; g.fillRect(0, 0, s, s);
+
+  // cartucho 35mm em pé
+  const bw = s * 0.32, bh = s * 0.46;
+  const bx = c - bw / 2 - s * 0.08, by = c - bh * 0.35;
+  g.fillStyle = "#23262b"; g.fillRect(bx, by, bw, bh);
+  const shine = g.createLinearGradient(bx, 0, bx + bw, 0);   // corpo cilíndrico
+  shine.addColorStop(0, "rgba(255,255,255,0)");
+  shine.addColorStop(0.3, "rgba(255,255,255,0.22)");
+  shine.addColorStop(0.6, "rgba(255,255,255,0)");
+  g.fillStyle = shine; g.fillRect(bx, by, bw, bh);
+  g.fillStyle = "#3a3f47"; g.fillRect(bx - 2, by - s * 0.05, bw + 4, s * 0.05);  // tampa
+  g.fillStyle = "#cfd6cf"; g.fillRect(bx + 3, by + bh * 0.20, bw - 6, bh * 0.44); // rótulo
+  g.fillStyle = "#a33630"; g.fillRect(bx + 3, by + bh * 0.56, bw - 6, 4);
+  g.fillStyle = "#23262b";
+  g.font = "bold 13px 'Courier New', monospace";
+  g.textAlign = "center"; g.textBaseline = "middle";
+  g.fillText("35", bx + bw / 2, by + bh * 0.38);
+
+  // língua de filme saindo do cartucho
+  g.fillStyle = "#3a3320";
+  g.fillRect(bx + bw, by + bh * 0.28, s * 0.30, bh * 0.36);
+  g.fillStyle = "#0a0a0a";
+  for (let i = 0; i < 4; i++) {
+    g.fillRect(bx + bw + 4 + i * s * 0.065, by + bh * 0.32, 4, 4);
+    g.fillRect(bx + bw + 4 + i * s * 0.065, by + bh * 0.54, 4, 4);
+  }
+  return cv;
+}
+
+function makeExitSprite() {
+  const w = 160, h = 200;
+  const cv = document.createElement("canvas");
+  cv.width = w; cv.height = h;
+  const g = cv.getContext("2d");
+  const cx = w / 2, cy = h * 0.52;
+
+  // clarão externo
+  const glow = g.createRadialGradient(cx, cy, 4, cx, cy, w * 0.60);
+  glow.addColorStop(0, "rgba(190,205,255,0.5)");
+  glow.addColorStop(1, "rgba(190,205,255,0)");
+  g.fillStyle = glow; g.fillRect(0, 0, w, h);
+
+  // vazio interno
+  const voidG = g.createRadialGradient(cx, cy, 2, cx, cy, w * 0.29);
+  voidG.addColorStop(0, "rgba(0,0,0,1)");
+  voidG.addColorStop(0.8, "rgba(8,10,25,0.95)");
+  voidG.addColorStop(1, "rgba(20,30,60,0.4)");
+  g.fillStyle = voidG;
+  g.beginPath(); g.ellipse(cx, cy, w * 0.28, h * 0.38, 0, 0, 7); g.fill();
+
+  // anel do portal
+  g.strokeStyle = "rgba(230,240,255,0.95)";
+  g.lineWidth = 5;
+  g.shadowColor = "rgba(150,180,255,0.9)";
+  g.shadowBlur = 16;
+  g.beginPath(); g.ellipse(cx, cy, w * 0.30, h * 0.40, 0, 0, 7); g.stroke();
+
+  // espirais sendo sugadas para dentro
+  g.strokeStyle = "rgba(150,175,240,0.6)";
+  g.lineWidth = 2; g.shadowBlur = 8;
+  for (let k = 0; k < 3; k++) {
+    g.beginPath();
+    let first = true;
+    for (let a = 0; a < Math.PI * 1.6; a += 0.15) {
+      const rr = (w * 0.26) * (1 - a / (Math.PI * 1.9));
+      const px2 = cx + Math.cos(a + k * 2.1) * rr;
+      const py2 = cy + Math.sin(a + k * 2.1) * rr * 1.35;
+      if (first) { g.moveTo(px2, py2); first = false; } else g.lineTo(px2, py2);
+    }
+    g.stroke();
+  }
+  return cv;
+}
+
+function makeAnomalySprite(captured) {
+  const s = 150;
+  const cv = document.createElement("canvas");
+  cv.width = s; cv.height = s;
+  const g = cv.getContext("2d");
+  const c = s / 2;
+  const main = captured ? "rgba(130,130,130," : "rgba(255,72,58,";
+  const glow = captured ? "rgba(120,120,120," : "rgba(255,40,30,";
+
+  const rad = g.createRadialGradient(c, c, 2, c, c, c);
+  rad.addColorStop(0, glow + "0.5)");
+  rad.addColorStop(0.55, glow + "0.14)");
+  rad.addColorStop(1, glow + "0)");
+  g.fillStyle = rad;
+  g.fillRect(0, 0, s, s);
+
+  g.strokeStyle = main + "0.9)";
+  g.shadowColor = glow + "0.9)";
+  g.shadowBlur = 12;
+  g.lineWidth = 3;
+
+  // anel externo com marcas
+  g.beginPath(); g.arc(c, c, s * 0.34, 0, 7); g.stroke();
+  for (let i = 0; i < 8; i++) {
+    const a = i * Math.PI / 4;
+    g.beginPath();
+    g.moveTo(c + Math.cos(a) * s * 0.34, c + Math.sin(a) * s * 0.34);
+    g.lineTo(c + Math.cos(a) * s * 0.42, c + Math.sin(a) * s * 0.42);
+    g.stroke();
+  }
+  // triângulo invertido + olho central
+  g.beginPath();
+  g.moveTo(c, c + s * 0.24);
+  g.lineTo(c - s * 0.21, c - s * 0.13);
+  g.lineTo(c + s * 0.21, c - s * 0.13);
+  g.closePath(); g.stroke();
+  g.beginPath(); g.arc(c, c, s * 0.07, 0, 7); g.stroke();
+  return cv;
+}
+
+// cena REALISTA: raycaster com superfícies contínuas e textura procedural,
+// renderizada em baixa resolução e ampliada (vira a base do passe VHS)
+function renderRealisticScene(c, px, py, FR, PW, PH, dirX, dirY, planeX, planeY, MAXD, W2) {
+  const H2 = Math.round(PH / 2);
+  if (!RS_S || RS_S.img.width !== W2 || RS_S.img.height !== H2) {
+    RS_S = { img: new ImageData(W2, H2), tmp: document.createElement("canvas") };
+    RS_S.tmp.width = W2; RS_S.tmp.height = H2;
+  }
+  const img = RS_S.img;
+  const d = img.data;
+  const zbuf = new Float32Array(W2);
+  const posZ = 0.675 * H2;
+
+  function h2(x, y) {
+    let n = x * 374761393 + y * 668265263 + 1013904223;
+    n = (n ^ (n >> 13)) * 1274126177;
+    return ((n ^ (n >> 16)) >>> 0) / 4294967295;
+  }
+  function vn(x, y) {
+    const xi = Math.floor(x), yi = Math.floor(y);
+    const fx = x - xi, fy = y - yi;
+    const a = h2(xi, yi), b = h2(xi + 1, yi);
+    const e = h2(xi, yi + 1), f = h2(xi + 1, yi + 1);
+    const sx = fx * fx * (3 - 2 * fx), sy = fy * fy * (3 - 2 * fy);
+    return a + (b - a) * sx + (e - a) * sy + (a - b - e + f) * sx * sy;
+  }
+  function fbm(x, y) {
+    return 0.62 * vn(x, y) + 0.27 * vn(x * 2.1 + 13.7, y * 2.1 + 7.3)
+         + 0.11 * vn(x * 4.3 + 31.1, y * 4.3 + 17.9);
+  }
+
+  for (let col = 0; col < W2; col++) {
+    const camX = 2 * col / W2 - 1;
+    const rdx = dirX + planeX * camX, rdy = dirY + planeY * camX;
+    let mapX = px | 0, mapY = py | 0;
+    const dX = Math.abs(1 / (rdx || 1e-9)), dY = Math.abs(1 / (rdy || 1e-9));
+    let stepX, stepY, sideX, sideY;
+    if (rdx < 0) { stepX = -1; sideX = (px - mapX) * dX; }
+    else         { stepX =  1; sideX = (mapX + 1 - px) * dX; }
+    if (rdy < 0) { stepY = -1; sideY = (py - mapY) * dY; }
+    else         { stepY =  1; sideY = (mapY + 1 - py) * dY; }
+
+    let side = 0, perp = MAXD, hit = false;
+    for (let it = 0; it < 160; it++) {
+      if (sideX < sideY) { sideX += dX; mapX += stepX; side = 0; }
+      else               { sideY += dY; mapY += stepY; side = 1; }
+      if (mapX < 0 || mapY < 0 || mapX >= COLS || mapY >= ROWS) break;
+      if (grid[mapY * COLS + mapX] === 1) {
+        perp = side === 0 ? sideX - dX : sideY - dY;
+        hit = true; break;
+      }
+      if (Math.min(sideX, sideY) > MAXD) break;
+    }
+    perp = Math.max(perp, 0.12);
+    zbuf[col] = perp;
+
+    const wallH = H2 * 1.35 / perp;
+    const start = H2 / 2 - wallH / 2;
+    const s0 = Math.max(0, Math.round(start));
+    const s1 = Math.min(H2 - 1, Math.round(start + wallH));
+    const centerFall = 1 - 0.42 * camX * camX;
+
+    let wallX = side === 0 ? py + perp * rdy : px + perp * rdx;
+    wallX -= Math.floor(wallX);
+
+    for (let yy = 0; yy < H2; yy++) {
+      let rr = 0, gg = 0, bb = 0;
+      if (hit && yy >= s0 && yy <= s1) {
+        // parede: reboco encardido
+        const texY = (yy - start) / wallH;
+        const t = fbm((mapX + wallX) * 5.1, texY * 5.1 + mapY * 2.7);
+        let L = Math.max(0, 1 - perp / 28) * centerFall * (0.5 + 0.8 * t);
+        if (side === 1) L *= 0.72;
+        if (texY > 0.88) L *= 0.55;              // rodapé mais escuro
+        rr = 208 * L; gg = 194 * L; bb = 166 * L;
+      } else if (yy > H2 / 2) {
+        // assoalho com manchas
+        const rowDist = posZ / (yy - H2 / 2);
+        const wx2 = px + rdx * rowDist, wy2 = py + rdy * rowDist;
+        const t = fbm(wx2 * 1.6, wy2 * 1.6);
+        const L = Math.max(0, 1 - rowDist / 24) * centerFall * (0.45 + 0.85 * t);
+        rr = 138 * L; gg = 124 * L; bb = 104 * L;
+      } else {
+        // teto engolido pela escuridão
+        const t = fbm(col * 0.06 + 99, yy * 0.06);
+        const v = 6 + 12 * t * centerFall;
+        rr = v; gg = v; bb = v * 0.94;
+      }
+      const i4 = (yy * W2 + col) * 4;
+      d[i4] = rr; d[i4 + 1] = gg; d[i4 + 2] = bb; d[i4 + 3] = 255;
+    }
+  }
+
+  RS_S.tmp.getContext("2d").putImageData(img, 0, 0);
+  c.imageSmoothingEnabled = true;
+  c.drawImage(RS_S.tmp, FR, FR, PW, PH);
+  return zbuf;
+}
+
+// pós-processamento "fita VHS 1996" aplicado à área interna da foto
+function vhsPass(cv, x, y, iw, ih) {
+  const c = cv.getContext("2d");
+
+  // baixa resolução analógica (down/upscale com borrão) — buffers reutilizados
+  if (!VHS_S || VHS_S.out.width !== iw || VHS_S.out.height !== ih) {
+    VHS_S = {
+      tmp: document.createElement("canvas"),
+      out: document.createElement("canvas"),
+      ch:  document.createElement("canvas"),
+    };
+    VHS_S.tmp.width = (iw * 0.55) | 0; VHS_S.tmp.height = (ih * 0.5) | 0;
+    VHS_S.out.width = iw; VHS_S.out.height = ih;
+    VHS_S.ch.width = iw;  VHS_S.ch.height = ih;
+  }
+  const tmp = VHS_S.tmp, out = VHS_S.out;
+  const tc = tmp.getContext("2d");
+  tc.clearRect(0, 0, tmp.width, tmp.height);
+  tc.drawImage(cv, x, y, iw, ih, 0, 0, tmp.width, tmp.height);
+
+  const o = out.getContext("2d");
+  o.globalCompositeOperation = "source-over";
+  o.fillStyle = "#000"; o.fillRect(0, 0, iw, ih);
+
+  // aberração cromática: canais R/G/B deslocados
+  function channel(color, dx2, dy2) {
+    const c2 = VHS_S.ch.getContext("2d");
+    c2.globalCompositeOperation = "source-over";
+    c2.clearRect(0, 0, iw, ih);
+    c2.drawImage(tmp, 0, 0, iw, ih);
+    c2.globalCompositeOperation = "multiply";
+    c2.fillStyle = color; c2.fillRect(0, 0, iw, ih);
+    o.globalCompositeOperation = "lighter";
+    o.drawImage(VHS_S.ch, dx2, dy2);
+  }
+  channel("#ff0000", 1.8, 0);
+  channel("#00ff00", 0, 0);
+  channel("#0000ff", -1.8, 0.6);
+
+  // tom amarelado lavado + pretos levantados
+  o.globalCompositeOperation = "multiply";
+  o.fillStyle = "rgba(238,224,168,0.30)"; o.fillRect(0, 0, iw, ih);
+  o.globalCompositeOperation = "lighten";
+  o.fillStyle = "rgb(24,26,18)"; o.fillRect(0, 0, iw, ih);
+  o.globalCompositeOperation = "source-over";
+
+  // scanlines
+  o.fillStyle = "rgba(0,0,0,0.22)";
+  for (let yy = 0; yy < ih; yy += 3) o.fillRect(0, yy, iw, 1);
+
+  // bandas de tracking (fatias deslocadas)
+  const nb = 1 + (Math.random() * 2 | 0);
+  for (let i = 0; i < nb; i++) {
+    const by = Math.random() * ih, bh2 = 2 + Math.random() * 7;
+    const off = (Math.random() - 0.5) * 16;
+    o.drawImage(out, 0, by, iw, bh2, off, by, iw, bh2);
+  }
+
+  // dropouts (riscos brancos de fita)
+  for (let i = 0; i < 7; i++) if (Math.random() < 0.6) {
+    o.fillStyle = `rgba(255,255,255,${0.08 + Math.random() * 0.22})`;
+    o.fillRect(Math.random() * iw, Math.random() * ih, 20 + Math.random() * 90, 1);
+  }
+  // grão pesado
+  for (let i = 0; i < 800; i++) {
+    const b = (Math.random() * 255) | 0;
+    o.fillStyle = `rgba(${b},${b},${b},0.06)`;
+    o.fillRect(Math.random() * iw, Math.random() * ih, 2, 1);
+  }
+
+  // overlay de camcorder
+  o.fillStyle = "rgba(255,64,52,0.95)";
+  o.beginPath(); o.arc(24, 22, 5, 0, 7); o.fill();
+  o.font = "bold 13px 'Courier New', monospace";
+  o.textAlign = "left"; o.textBaseline = "middle";
+  o.fillStyle = "rgba(235,235,235,0.92)";
+  o.fillText("REC", 36, 22);
+  o.textAlign = "right";
+  const mm = String((Math.random() * 59) | 0).padStart(2, "0");
+  const ss = String((Math.random() * 59) | 0).padStart(2, "0");
+  o.fillText(`NOITE ${level}  03:${mm}:${ss} AM`, iw - 14, 22);
+
+  c.drawImage(out, x, y);
+}
+
+// desenha o sprite coluna a coluna respeitando o z-buffer das paredes
+function blitOccluded(c, spr, zbuf, ty, centerX, topY, wPx, hPx, alpha, W, CW, FR) {
+  const destX = centerX - wPx / 2;
+  const colStart = Math.max(0, Math.floor((destX - FR) / CW));
+  const colEnd = Math.min(W - 1, Math.ceil((destX + wPx - FR) / CW));
+  c.save();
+  c.globalAlpha = Math.max(0, Math.min(1, alpha));
+  for (let col = colStart; col <= colEnd; col++) {
+    if (ty >= zbuf[col]) continue;
+    const dx0 = FR + col * CW;
+    const sx0 = (dx0 - destX) / wPx * spr.width;
+    const sw = Math.max(1, CW / wPx * spr.width);
+    c.drawImage(spr, sx0, 0, sw, spr.height, dx0, topY, CW, hPx);
+  }
+  c.restore();
+}
+
+function renderPhoto(px, py, dir, gotAnomaly) {
+  const W = 96, H = 58, CW = 6, CH = 7;
+  const FR = 14, BOT = 44;                       // moldura
+  const cv = document.createElement("canvas");
+  cv.width = W * CW + FR * 2; cv.height = H * CH + FR + BOT;
+  const c = cv.getContext("2d");
+
+  // moldura
+  c.fillStyle = "#1a1a1a"; c.fillRect(0, 0, cv.width, cv.height);
+  c.strokeStyle = "#3a3a3a"; c.strokeRect(2.5, 2.5, cv.width - 5, cv.height - 5);
+  c.fillStyle = "#000"; c.fillRect(FR, FR, W * CW, H * CH);
+
+  c.font = "bold 8px 'Courier New', monospace";
+  c.textAlign = "center"; c.textBaseline = "middle";
+
+  const FOV = 1.15;
+  const dirX = Math.cos(dir), dirY = Math.sin(dir);
+  const tanF = Math.tan(FOV / 2);
+  const planeX = -dirY * tanF, planeY = dirX * tanF;
+
+  const MAXD = 32;
+  const Wc = 288, CWc = (W * CW) / 288;
+  const zbuf = renderRealisticScene(c, px, py, FR, W * CW, H * CH,
+                                    dirX, dirY, planeX, planeY, MAXD, Wc);
+
+
+  // --- sprites (fantasmas e anomalias) com z-buffer ---
+  const sprites = [];
+  for (const g of ghosts) if (g.respawn <= 0)
+    sprites.push({ x: g.x, y: g.y, kind: "ghost", gh: g });
+  for (const a of anomalies)
+    sprites.push({ x: a.x, y: a.y, kind: a.captured ? "anomOld" : "anom" });
+  for (const f of filmPickups)
+    sprites.push({ x: f.x, y: f.y, kind: "film" });
+  if (exitP.active)
+    sprites.push({ x: exitP.x, y: exitP.y, kind: "exit" });
+
+  const invDet = 1 / (planeX * dirY - dirX * planeY);
+  sprites.sort((a, b) =>
+    Math.hypot(b.x - px, b.y - py) - Math.hypot(a.x - px, a.y - py));
+
+  const areaH = H * CH;
+  for (const s of sprites) {
+    const dx = s.x - px, dy = s.y - py;
+    const tx = invDet * (dirY * dx - dirX * dy);
+    const ty = invDet * (-planeY * dx + planeX * dy);
+    if (ty <= 0.4 || ty > MAXD) continue;
+    const sxCol = (Wc / 2) * (1 + tx / ty);
+    if (sxCol < -Wc * 0.3 || sxCol > Wc * 1.3) continue;
+    const centerX = FR + sxCol * CWc;
+    const bright = Math.max(0, 1 - ty / 24);
+    if (bright <= 0.03) continue;
+
+    const wallHpx = (H * 1.35 / ty) * CH;                 // altura de 1 célula na tela
+    const floorPx = FR + (areaH + wallHpx) / 2;           // linha do chão nessa distância
+
+    if (s.kind === "ghost") {
+      // sprite do pool, fixado por fantasma: mesma criatura = mesma cara
+      const spr = s.gh.sprCv || (s.gh.sprCv = ghostSprite(s.gh.artSeed));
+      const hs = spr._hscale || 1;
+      const hPx = Math.min(areaH * 1.3, (H * 1.7 / ty) * CH) * hs;
+      const wPx = hPx * (spr._aspect || 0.72);
+      const topY = floorPx - hPx * 0.97;          // pés/garras no chão
+      // halo sutil do flash (o rosto pálido já reflete a luz)
+      const glow = GLOW_SPR || (GLOW_SPR = makeGlowSprite());
+      blitOccluded(c, glow, zbuf, ty, centerX, topY - hPx * 0.04,
+                   wPx * 1.25, hPx * 1.05, 0.16 + bright * 0.2, Wc, CWc, FR);
+      blitOccluded(c, spr, zbuf, ty, centerX, topY, wPx, hPx,
+                   Math.min(1, 0.35 + bright * 1.1), Wc, CWc, FR);
+    } else if (s.kind === "film") {
+      const spr = FILM_SPR || (FILM_SPR = makeFilmSprite());
+      const hPx = Math.min(areaH * 0.7, wallHpx * 0.6);
+      blitOccluded(c, spr, zbuf, ty, centerX, floorPx - hPx, hPx, hPx, 0.35 + bright, Wc, CWc, FR);
+    } else if (s.kind === "exit") {
+      const spr = EXIT_SPR || (EXIT_SPR = makeExitSprite());
+      const hPx = Math.min(areaH * 1.15, wallHpx * 1.55);
+      const wPx = hPx * 0.8;
+      blitOccluded(c, spr, zbuf, ty, centerX, floorPx - hPx, wPx, hPx, 0.4 + bright, Wc, CWc, FR);
+    } else {
+      const spr = makeAnomalySprite(s.kind === "anomOld");
+      const hPx = Math.min(areaH * 0.9, (H * 0.9 / ty) * CH);
+      const topY = FR + areaH * 0.5 + (H * 0.25 / ty) * CH - hPx / 2;
+      blitOccluded(c, spr, zbuf, ty, centerX, topY, hPx, hPx, 0.3 + bright, Wc, CWc, FR);
+    }
+  }
+
+  // --- grão e vinheta ---
+  for (let i = 0; i < 420; i++) {
+    const gx = FR + Math.random() * W * CW, gy = FR + Math.random() * H * CH;
+    c.fillStyle = `rgba(255,255,255,${Math.random() * 0.08})`;
+    c.fillRect(gx, gy, 1.5, 1.5);
+  }
+  const vg = c.createRadialGradient(cv.width / 2, (FR + H * CH) / 2, H * CH * 0.35,
+                                    cv.width / 2, (FR + H * CH) / 2, H * CH * 0.85);
+  vg.addColorStop(0, "rgba(0,0,0,0)");
+  vg.addColorStop(1, "rgba(0,0,0,0.55)");
+  c.fillStyle = vg; c.fillRect(FR, FR, W * CW, H * CH);
+
+  // passe VHS 1996 (só a área da imagem; moldura e legenda intactas)
+  vhsPass(cv, FR, FR, W * CW, H * CH);
+
+  // --- legenda na moldura ---
+  c.textAlign = "left";
+  c.font = "bold 12px 'Courier New', monospace";
+  c.fillStyle = "#888";
+  c.fillText(`FOTO ${photoCount}  ·  NOITE ${level}`, FR, cv.height - 18);
+  if (gotAnomaly) {
+    c.fillStyle = "#c04040";
+    c.textAlign = "right";
+    c.fillText("ANOMALIA REGISTRADA", cv.width - FR, cv.height - 18);
+  }
+  return cv;
+}
+
+// ==================================================================
+// UPDATE
+// ==================================================================
+function collides(x, y) {
+  const r = PLAYER_RADIUS;
+  const minX = Math.floor(x - r), maxX = Math.floor(x + r);
+  const minY = Math.floor(y - r), maxY = Math.floor(y + r);
+  for (let cy = minY; cy <= maxY; cy++)
+    for (let cx = minX; cx <= maxX; cx++)
+      if (isWall(cx, cy)) {
+        const nx = Math.max(cx, Math.min(x, cx + 1));
+        const ny = Math.max(cy, Math.min(y, cy + 1));
+        if ((x - nx) ** 2 + (y - ny) ** 2 < r * r) return true;
+      }
+  return false;
+}
+
+function update(dt) {
+  // --- jogador ---
+  let vx = 0, vy = 0;
+  if (keys.has("KeyW") || keys.has("ArrowUp"))    vy -= 1;
+  if (keys.has("KeyS") || keys.has("ArrowDown"))  vy += 1;
+  if (keys.has("KeyA") || keys.has("ArrowLeft"))  vx -= 1;
+  if (keys.has("KeyD") || keys.has("ArrowRight")) vx += 1;
+  if (Math.hypot(touchUI.jx, touchUI.jy) > 0.2) { vx += touchUI.jx; vy += touchUI.jy; }
+  if (vx || vy) {
+    const len = Math.hypot(vx, vy);
+    vx = vx / len * PLAYER_SPEED * dt;
+    vy = vy / len * PLAYER_SPEED * dt;
+    if (!collides(player.x + vx, player.y)) player.x += vx;
+    if (!collides(player.x, player.y + vy)) player.y += vy;
+  }
+
+  // --- timers ---
+  if (flashCd > 0) flashCd -= dt;
+  if (flashT > 0) flashT = Math.max(0, flashT - dt / FLASH.duration);
+  if (attractT > 0) attractT -= dt;
+  if (shake > 0) shake = Math.max(0, shake - dt * 3);
+  if (flickDip > 0) flickDip -= dt;
+  if (announceT > 0) announceT -= dt;
+  if (dmgSfxT > 0) dmgSfxT -= dt;
+
+  // --- eventos de tensão ---
+  eventT -= dt;
+  if (eventT <= 0) {
+    eventT = 16 + rng() * 20;
+    if (rng() < 0.6) { flickDip = 0.55; sfxWhisper(); }
+    else sfxWhisper();
+  }
+
+  // --- fantasmas ---
+  let nearest = 999;
+  const gSpeed = 3.0 + level * 0.4;    // fantasmas aceleram por noite
+  for (const g of ghosts) {
+    if (g.respawn > 0) {
+      g.respawn -= dt;
+      if (g.respawn <= 0) { const ng = spawnGhost(); Object.assign(g, ng); }
+      continue;
+    }
+    const d = Math.hypot(player.x - g.x, player.y - g.y);
+    nearest = Math.min(nearest, d);
+
+    g.chase = d < 18 || attractT > 0;
+    let tx, ty;
+    if (g.chase) { tx = player.x; ty = player.y; }
+    else {
+      if (Math.hypot(g.wx - g.x, g.wy - g.y) < 1.5) {
+        // metade dos destinos é perto do jogador: eles rondam a presa
+        if (rng() < 0.5) {
+          g.wx = player.x + (rng() - 0.5) * 22;
+          g.wy = player.y + (rng() - 0.5) * 22;
+        } else {
+          const r = rooms[rng() * rooms.length | 0];
+          const p = randInRoom(r); g.wx = p.x; g.wy = p.y;
+        }
+      }
+      tx = g.wx; ty = g.wy;
+    }
+    const dd = Math.hypot(tx - g.x, ty - g.y) || 1;
+    const sp = g.chase ? gSpeed : gSpeed * 0.55;
+    g.bob += dt * 2.2;
+    g.x += (tx - g.x) / dd * sp * dt + Math.cos(g.bob) * 0.6 * dt;
+    g.y += (ty - g.y) / dd * sp * dt + Math.sin(g.bob * 1.3) * 0.6 * dt;
+    if (!g.chase) {                       // atração constante, mesmo vagando
+      g.x += (player.x - g.x) / d * gSpeed * 0.30 * dt;
+      g.y += (player.y - g.y) / d * gSpeed * 0.30 * dt;
+    }
+
+    // toque do fantasma
+    if (d < 1.15) {
+      sanity -= (30 + level * 6) * dt;   // toque drena mais rápido a cada noite
+      shake = 1;
+      if (dmgSfxT <= 0) { sfxDamage(); dmgSfxT = 0.5; }
+    }
+  }
+
+  // regeneração lenta longe deles
+  if (nearest > 10 && sanity < 100) sanity = Math.min(100, sanity + 3.5 * dt);
+
+  if (sanity <= 0) { state = "dead"; sfxDeath(); return; }
+
+  // --- batimento cardíaco ---
+  hbT -= dt;
+  if (nearest < 20 && hbT <= 0) {
+    hbT = 0.32 + (nearest / 20) * 1.1;
+    sfxHeart(0.22 * (1 - nearest / 22));
+  }
+
+  // --- pickups de filme ---
+  for (let i = filmPickups.length - 1; i >= 0; i--) {
+    const f = filmPickups[i];
+    if (Math.hypot(f.x - player.x, f.y - player.y) < 1.1) {
+      film = Math.min(FILM_MAX, film + FILM_REFILL);
+      filmPickups.splice(i, 1);
+      sfxPickup();
+    }
+  }
+
+  // --- saída ---
+  if (exitP.active && Math.hypot(exitP.x - player.x, exitP.y - player.y) < 1.4) {
+    state = "transition"; transT = 2.4;
+    sfxSting();
+  }
+
+  // --- partículas ---
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.life -= dt;
+    if (p.life <= 0) { particles.splice(i, 1); continue; }
+    p.x += p.vx * dt; p.y += p.vy * dt;
+    p.vx *= 0.94; p.vy *= 0.94;
+  }
+}
+
+// ==================================================================
+// RENDER
+// ==================================================================
+function render() {
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.fillStyle = "#000";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  if (state === "intro") { drawIntro(); return; }
+
+  if (shake > 0)
+    ctx.setTransform(1, 0, 0, 1,
+      (Math.random() - 0.5) * 7 * shake, (Math.random() - 0.5) * 7 * shake);
+
+  const dir = aimAngle();
+  const tick = Math.floor(time * 12);
+
+  // --- luz ---
+  light.fill(0);
+  let flick = 0.9 + 0.1 * hash(7, 13, tick);
+  if (flickDip > 0) flick *= 0.3 + 0.35 * hash(3, 5, tick);
+  castLight(player.x, player.y, dir,
+            LANTERNA.halfAngle, LANTERNA.range, LANTERNA.power * flick, LANTERNA.rays);
+  if (flashT > 0) {
+    const p = FLASH.power * flashT * flashT;
+    castLight(player.x, player.y, flashDir, FLASH.halfAngle, FLASH.range, p, FLASH.rays);
+  }
+  addGlow(player.x, player.y, 3.5, 0.22);
+  if (exitP.active) addGlow(exitP.x, exitP.y, 4, 0.3 + 0.1 * Math.sin(time * 2));
+
+  // --- células ASCII ---
+  ctx.font = "bold 11px 'Courier New', monospace";
+  ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  for (let cy = 0; cy < ROWS; cy++) {
+    for (let cx = 0; cx < COLS; cx++) {
+      const idx = cy * COLS + cx;
+      let v = light[idx];
+      if (v <= 0.02) continue;
+      const n = hash(cx, cy, tick);
+      v = v * (0.82 + 0.36 * n);
+      const clamped = Math.min(v, 1);
+      const ci = Math.min(RAMP.length - 1, (clamped * RAMP.length) | 0);
+      if (ci === 0) continue;
+      const isW = grid[idx] === 1;
+      const b = (60 + 195 * clamped) | 0;
+      ctx.fillStyle = isW
+        ? `rgb(${b},${(b * 0.88) | 0},${(b * 0.66) | 0})`
+        : `rgb(${b},${b},${b})`;
+      ctx.fillText(isW ? "#" : RAMP[ci], cx * CELL + CELL / 2, cy * CELL + CELL / 2 + 1);
+    }
+  }
+
+  // --- itens ---
+  for (const a of anomalies) {
+    const L = Math.min(1, lightAt(a.x, a.y) * 1.8);
+    if (L <= 0.03) continue;
+    ctx.font = "bold 15px 'Courier New', monospace";
+    if (a.captured) ctx.fillStyle = `rgba(110,110,110,${L * 0.5})`;
+    else ctx.fillStyle = `rgba(230,70,60,${L})`;
+    ctx.fillText("§", a.x * CELL, a.y * CELL + 1);
+  }
+  ctx.font = "bold 12px 'Courier New', monospace";
+  for (const f of filmPickups) {
+    const L = Math.min(1, lightAt(f.x, f.y) * 1.8);
+    if (L <= 0.03) continue;
+    ctx.fillStyle = `rgba(180,220,180,${L})`;
+    ctx.fillText("¤", f.x * CELL, f.y * CELL);
+  }
+  if (exitP.active) {
+    const L = Math.min(1, lightAt(exitP.x, exitP.y) * 2);
+    ctx.font = "bold 18px 'Courier New', monospace";
+    ctx.fillStyle = `rgba(240,240,255,${0.4 + 0.6 * L})`;
+    ctx.fillText("▼", exitP.x * CELL, exitP.y * CELL);
+  }
+
+  // --- fantasmas ---
+  for (const g of ghosts) {
+    if (g.respawn > 0) continue;
+    const L = Math.min(1, lightAt(g.x, g.y) * 1.9);
+    if (L <= 0.04) continue;
+    const gy = g.y * CELL + Math.sin(g.bob) * 2.5;
+    ctx.font = "bold 20px 'Courier New', monospace";
+    const b = (90 + 165 * L) | 0;
+    ctx.fillStyle = `rgba(${(b * 0.82) | 0},${(b * 0.92) | 0},${b},${0.35 + 0.65 * L})`;
+    ctx.fillText("Ψ", g.x * CELL, gy);
+    if (L > 0.4) {
+      ctx.fillStyle = `rgba(255,60,60,${L})`;
+      ctx.fillRect(g.x * CELL - 4, gy - 4, 2, 2);
+      ctx.fillRect(g.x * CELL + 2, gy - 4, 2, 2);
+    }
+  }
+
+  // --- partículas ---
+  ctx.font = "bold 11px 'Courier New', monospace";
+  for (const p of particles) {
+    ctx.fillStyle = `rgba(190,210,255,${p.life})`;
+    ctx.fillText(p.ch, p.x * CELL, p.y * CELL);
+  }
+
+  // --- jogador ---
+  const px = player.x * CELL, py = player.y * CELL;
+  ctx.save();
+  ctx.translate(px, py);
+  ctx.rotate(dir + Math.PI / 2);
+  ctx.fillStyle = "#fff";
+  ctx.beginPath();
+  ctx.moveTo(0, -7); ctx.lineTo(5.5, 6); ctx.lineTo(-5.5, 6);
+  ctx.closePath(); ctx.fill();
+  ctx.restore();
+
+  // --- clarão do flash ---
+  if (flashT > 0) {
+    ctx.fillStyle = `rgba(255,255,255,${(flashT * flashT * 0.18).toFixed(3)})`;
+    ctx.fillRect(-10, -10, canvas.width + 20, canvas.height + 20);
+  }
+
+  // --- estática (sanidade baixa) ---
+  if (sanity < 70) {
+    const inten = (70 - sanity) / 70;
+    const n = (inten * 350) | 0;
+    for (let i = 0; i < n; i++) {
+      const b = (Math.random() * 160) | 0;
+      ctx.fillStyle = `rgba(${b},${b},${b},0.35)`;
+      ctx.fillRect(Math.random() * canvas.width, Math.random() * canvas.height, 2, 2);
+    }
+  }
+
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+
+  // --- mira ---
+  if (state === "play") {
+    ctx.strokeStyle = "rgba(255,255,255,0.55)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(mouse.x - 5, mouse.y); ctx.lineTo(mouse.x + 5, mouse.y);
+    ctx.moveTo(mouse.x, mouse.y - 5); ctx.lineTo(mouse.x, mouse.y + 5);
+    ctx.stroke();
+  }
+
+  drawHUD();
+
+  if (state === "album") drawAlbum();
+  if (state === "dead") drawDead();
+  if (state === "transition") drawTransition();
+}
+
+// ==================================================================
+// HUD e telas
+// ==================================================================
+function drawHUD() {
+  ctx.font = "bold 12px 'Courier New', monospace";
+  ctx.textAlign = "left"; ctx.textBaseline = "middle";
+
+  // topo
+  ctx.fillStyle = "rgba(190,190,190,0.75)";
+  const cap = anomalies.filter(a => a.captured).length;
+  ctx.fillText(`NOITE ${level}`, 12, 18);
+  ctx.fillText(`ANOMALIAS ${cap}/${anomalies.length}`, 110, 18);
+  ctx.fillStyle = film > 0 ? "rgba(190,190,190,0.75)" : "rgba(230,80,70,0.9)";
+  ctx.fillText(`FILME ${"▮".repeat(film)}${"▯".repeat(Math.max(0, FILM_MAX - film))}`, 290, 18);
+  if (exitP.active) {
+    ctx.fillStyle = `rgba(240,240,255,${0.5 + 0.5 * Math.sin(time * 3)})`;
+    ctx.fillText("A PASSAGEM SE ABRIU — encontre ▼", 560, 18);
+  }
+
+  // aviso grande ao liberar a porta
+  if (announceT > 0 && state === "play") {
+    const a = Math.min(1, announceT / 1.2);
+    ctx.textAlign = "center";
+    ctx.font = "bold 40px 'Courier New', monospace";
+    ctx.fillStyle = `rgba(235,240,255,${(0.75 + 0.25 * Math.sin(time * 6)) * a})`;
+    ctx.fillText(announceText, canvas.width / 2, 90);
+    ctx.font = "bold 15px 'Courier New', monospace";
+    ctx.fillStyle = `rgba(180,185,205,${0.8 * a})`;
+    ctx.fillText("encontre ▼ para descer ao próximo andar", canvas.width / 2, 122);
+    ctx.textAlign = "left";
+  }
+
+  // sanidade
+  ctx.fillStyle = "rgba(120,120,120,0.5)";
+  ctx.fillText("SANIDADE", 12, canvas.height - 46);
+  ctx.strokeStyle = "rgba(150,150,150,0.4)";
+  ctx.strokeRect(90, canvas.height - 52, 140, 11);
+  const sc = sanity > 40 ? "rgba(200,200,200,0.7)" : "rgba(230,70,60,0.85)";
+  ctx.fillStyle = sc;
+  ctx.fillRect(91, canvas.height - 51, 138 * Math.max(0, sanity) / 100, 9);
+
+  ctx.fillStyle = "rgba(160,160,160,0.55)";
+  ctx.fillText("WASD mover · mouse lanterna · botão direito FOTO · F álbum", 12, canvas.height - 14);
+
+  // controles de toque (aparecem depois do primeiro toque)
+  if (touchUI.seen && state === "play") {
+    if (touchUI.joyId !== null) {
+      ctx.strokeStyle = "rgba(255,255,255,0.25)";
+      ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(touchUI.bx, touchUI.by, 55, 0, 7); ctx.stroke();
+      ctx.fillStyle = "rgba(255,255,255,0.3)";
+      ctx.beginPath();
+      ctx.arc(touchUI.bx + touchUI.jx * 55, touchUI.by + touchUI.jy * 55, 18, 0, 7);
+      ctx.fill();
+    }
+    ctx.lineWidth = 2;
+    ctx.textAlign = "center";
+    ctx.strokeStyle = "rgba(255,255,255,0.4)";
+    ctx.beginPath(); ctx.arc(BTN_PHOTO.x, BTN_PHOTO.y, BTN_PHOTO.r, 0, 7); ctx.stroke();
+    ctx.fillStyle = flashCd <= 0 && film > 0 ? "rgba(255,255,255,0.75)" : "rgba(255,120,120,0.6)";
+    ctx.font = "bold 15px 'Courier New', monospace";
+    ctx.fillText("FOTO", BTN_PHOTO.x, BTN_PHOTO.y + 1);
+    ctx.strokeStyle = "rgba(255,255,255,0.35)";
+    ctx.beginPath(); ctx.arc(BTN_ALBUM.x, BTN_ALBUM.y, BTN_ALBUM.r, 0, 7); ctx.stroke();
+    ctx.fillStyle = "rgba(255,255,255,0.6)";
+    ctx.font = "bold 11px 'Courier New', monospace";
+    ctx.fillText("ÁLBUM", BTN_ALBUM.x, BTN_ALBUM.y + 1);
+    ctx.textAlign = "left";
+  }
+  ctx.fillStyle = flashCd <= 0 && film > 0 ? "rgba(120,255,120,0.7)" : "rgba(255,120,120,0.7)";
+  ctx.fillText(film <= 0 ? "CAMERA [ SEM FILME ]" :
+               flashCd <= 0 ? "CAMERA [ PRONTA ]" : "CAMERA [ RECARREGANDO ]",
+               12, canvas.height - 30);
+}
+
+function drawIntro() {
+  ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  ctx.font = "bold 52px 'Courier New', monospace";
+  const g = 200 + 40 * Math.sin(time * 2);
+  ctx.fillStyle = `rgb(${g | 0},${g | 0},${g | 0})`;
+  ctx.fillText("O B S C U R A", canvas.width / 2, 150);
+
+  ctx.font = "bold 14px 'Courier New', monospace";
+  ctx.fillStyle = "rgba(180,180,180,0.85)";
+  const lines = [
+    "Você é um perito em fenômenos, enviado para documentar a Casa Vazia.",
+    "",
+    "A cada noite, FOTOGRAFE as 3 ANOMALIAS ( § ) para romper o selo",
+    "e revelar a PASSAGEM ( ▼ ) para o andar seguinte.",
+    "",
+    "O filme é curto — procure refis ( ¤ ) pelos quartos.",
+    "Os moradores ( Ψ ) não gostam de visitas. O flash os desfaz...",
+    "mas a luz também os atrai. Não deixe que toquem você.",
+    "",
+    "WASD / setas: mover      mouse: lanterna",
+    "botão direito: fotografar      F: álbum de fotos",
+    "celular: arraste à esquerda p/ andar, à direita p/ mirar",
+  ];
+  lines.forEach((l, i) => ctx.fillText(l, canvas.width / 2, 240 + i * 26));
+
+  ctx.fillStyle = `rgba(255,255,255,${0.4 + 0.4 * Math.sin(time * 3)})`;
+  ctx.fillText("— clique para entrar —", canvas.width / 2, 545);
+
+  // cursor visível na intro
+  ctx.strokeStyle = "rgba(255,255,255,0.7)";
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(mouse.x - 5, mouse.y); ctx.lineTo(mouse.x + 5, mouse.y);
+  ctx.moveTo(mouse.x, mouse.y - 5); ctx.lineTo(mouse.x, mouse.y + 5);
+  ctx.stroke();
+}
+
+function drawAlbum() {
+  ctx.fillStyle = "rgba(0,0,0,0.86)";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  ctx.font = "bold 18px 'Courier New', monospace";
+  ctx.fillStyle = "rgba(200,200,200,0.9)";
+  ctx.fillText("ÁLBUM DE FOTOS", canvas.width / 2, 36);
+
+  if (album.length === 0) {
+    ctx.font = "bold 14px 'Courier New', monospace";
+    ctx.fillStyle = "rgba(150,150,150,0.7)";
+    ctx.fillText("nenhuma foto revelada ainda", canvas.width / 2, canvas.height / 2);
+  } else {
+    const ph = album[albumIdx];
+    const maxH = 520;
+    const sc = Math.min(maxH / ph.cv.height, 900 / ph.cv.width);
+    const w = ph.cv.width * sc, h = ph.cv.height * sc;
+    ctx.drawImage(ph.cv, canvas.width / 2 - w / 2, 70, w, h);
+    ctx.font = "bold 13px 'Courier New', monospace";
+    ctx.fillStyle = "rgba(170,170,170,0.8)";
+    ctx.fillText(`${albumIdx + 1} / ${album.length}`, canvas.width / 2, canvas.height - 56);
+  }
+  ctx.font = "bold 12px 'Courier New', monospace";
+  ctx.fillStyle = "rgba(140,140,140,0.7)";
+  ctx.fillText("← → navegar   ·   F fechar", canvas.width / 2, canvas.height - 28);
+}
+
+function drawDead() {
+  ctx.fillStyle = "rgba(0,0,0,0.8)";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  ctx.font = "bold 34px 'Courier New', monospace";
+  ctx.fillStyle = "rgba(200,50,45,0.9)";
+  ctx.fillText("OS MORADORES TE LEVARAM", canvas.width / 2, canvas.height / 2 - 30);
+  ctx.font = "bold 14px 'Courier New', monospace";
+  ctx.fillStyle = "rgba(180,180,180,0.8)";
+  ctx.fillText(`você resistiu até a noite ${level}`, canvas.width / 2, canvas.height / 2 + 16);
+  ctx.fillStyle = `rgba(255,255,255,${0.4 + 0.4 * Math.sin(time * 3)})`;
+  ctx.fillText("ENTER para tentar novamente", canvas.width / 2, canvas.height / 2 + 60);
+}
+
+function drawTransition() {
+  ctx.fillStyle = "rgba(0,0,0,0.75)";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  ctx.font = "bold 30px 'Courier New', monospace";
+  ctx.fillStyle = "rgba(220,220,220,0.9)";
+  ctx.fillText(`NOITE ${level} DOCUMENTADA`, canvas.width / 2, canvas.height / 2 - 16);
+  ctx.font = "bold 14px 'Courier New', monospace";
+  ctx.fillStyle = "rgba(160,160,160,0.8)";
+  ctx.fillText("descendo para o próximo andar...", canvas.width / 2, canvas.height / 2 + 26);
+}
+
+// ==================================================================
+// LOOP
+// ==================================================================
+function frame(now) {
+  const dt = Math.min((now - last) / 1000, 0.05);
+  last = now;
+  time += dt;
+
+  if (state === "play") update(dt);
+  else if (state === "transition") {
+    transT -= dt;
+    if (transT <= 0) {
+      level++;
+      film = Math.min(FILM_MAX, film + 2);
+      genLevel();
+      state = "play";
+    }
+  }
+
+  render();
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
