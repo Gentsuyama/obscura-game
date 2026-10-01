@@ -750,8 +750,10 @@ function penTools(g, r) {
       let y = Math.sin(a0) * R * (0.80 + r() * 0.14) - R * 0.08;
       const wild = r() < 0.12;                       // raros fios rebeldes
       const side = Math.cos(a0) >= 0 ? 1 : -1;       // escorre pelo seu lado
-      let vx2 = side * (0.25 + Math.abs(Math.cos(a0)) * 0.5) * (wild ? 2.2 : 1);
-      let vy2 = wild ? 0.15 + r() * 0.3 : 0.7 + r() * 0.3;
+      // nasce quase parado: a gravidade assume na hora e o fio despenca justo
+      let vx2 = wild ? side * (0.6 + r() * 0.8)
+                     : side * (0.06 + Math.abs(Math.cos(a0)) * 0.12);
+      let vy2 = wild ? 0.15 + r() * 0.3 : 0.08 + r() * 0.08;
       g.strokeStyle = `rgba(215,215,222,${0.05 + r() * 0.2})`;
       g.lineWidth = 0.5 + r() * 0.8;
       g.beginPath(); g.moveTo(x, y);
