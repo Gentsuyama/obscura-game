@@ -393,6 +393,7 @@ window.addEventListener("keydown", e => {
   }
   if (state === "dead") {
     if (e.code === "Enter") { retry(); return; }
+    if (e.code === "Escape" || e.code === "KeyM") { state = "intro"; return; }
     if (e.code === "KeyF") {                       // rever as fotos da run
       state = "album"; albumReturn = "dead";
       albumIdx = Math.max(0, album.length - 1);
@@ -425,14 +426,16 @@ canvas.addEventListener("mousemove", e => {
 });
 canvas.addEventListener("contextmenu", e => e.preventDefault());
 canvas.addEventListener("mousedown", e => {
+  const rct = canvas.getBoundingClientRect();
+  const mx = (e.clientX - rct.left) * (canvas.width / rct.width);
+  const my = (e.clientY - rct.top) * (canvas.height / rct.height);
   if (state === "intro") {
-    const rct = canvas.getBoundingClientRect();
-    const mx = (e.clientX - rct.left) * (canvas.width / rct.width);
-    const my = (e.clientY - rct.top) * (canvas.height / rct.height);
     if (mx >= BTN_START.x && mx <= BTN_START.x + BTN_START.w &&
         my >= BTN_START.y && my <= BTN_START.y + BTN_START.h) startGame();
     return;
   }
+  if (state === "dead") { deadHit(mx, my); return; }
+  if (state === "album") { albumHit(mx, my); return; }
   if (state !== "play") return;
   if (e.button === 2) takePhoto();
 });
@@ -454,6 +457,34 @@ const BTN_PHOTO  = { x: 1050, y: 360, r: 62 };                       // acima do
 const BTN_ALBUM  = { x: 1118, y: 70,  r: 46 };
 const BTN_FS     = { x: 1118, y: 182, r: 40 };  // tela cheia (só no touch)
 const BTN_START  = { x: 460, y: 565, w: 280, h: 70 };
+const DEAD_BTNS = [
+  { id: "fotos", x: 210, y: 430, w: 240, h: 76, label: "VER FOTOS" },
+  { id: "jogar", x: 480, y: 430, w: 240, h: 76, label: "JOGAR" },
+  { id: "menu",  x: 750, y: 430, w: 240, h: 76, label: "MENU" },
+];
+const ALB_CLOSE = { x: 1040, y: 20, w: 140, h: 56 };
+
+function deadHit(px2, py2) {
+  for (const b of DEAD_BTNS)
+    if (px2 >= b.x && px2 <= b.x + b.w && py2 >= b.y && py2 <= b.y + b.h) {
+      if (b.id === "fotos") {
+        state = "album"; albumReturn = "dead";
+        albumIdx = Math.max(0, album.length - 1);
+      } else if (b.id === "jogar") retry();
+      else state = "intro";
+      return;
+    }
+}
+function albumHit(px2, py2) {
+  if (px2 >= ALB_CLOSE.x && px2 <= ALB_CLOSE.x + ALB_CLOSE.w &&
+      py2 >= ALB_CLOSE.y && py2 <= ALB_CLOSE.y + ALB_CLOSE.h) {
+    state = albumReturn; return;
+  }
+  if (album.length && px2 > canvas.width * 0.66)
+    albumIdx = Math.min(album.length - 1, albumIdx + 1);
+  else if (album.length && px2 < canvas.width * 0.33 && albumIdx > 0) albumIdx--;
+  else state = albumReturn;
+}
 
 function updateMoveStick(p) {
   const dx = p.x - MOVE_STICK.x, dy = p.y - MOVE_STICK.y;
@@ -508,21 +539,8 @@ canvas.addEventListener("touchstart", e => {
       }
       return;
     }
-    if (state === "dead") {
-      if (Math.abs(p.x - canvas.width / 2) < 130 &&
-          p.y > canvas.height / 2 + 92 && p.y < canvas.height / 2 + 148) {
-        state = "album"; albumReturn = "dead";
-        albumIdx = Math.max(0, album.length - 1);
-      } else retry();
-      return;
-    }
-    if (state === "album") {
-      if (album.length && p.x > canvas.width * 0.66)
-        albumIdx = Math.min(album.length - 1, albumIdx + 1);
-      else if (album.length && p.x < canvas.width * 0.33 && albumIdx > 0) albumIdx--;
-      else state = albumReturn;
-      return;
-    }
+    if (state === "dead") { deadHit(p.x, p.y); return; }
+    if (state === "album") { albumHit(p.x, p.y); return; }
     if (Math.hypot(p.x - BTN_PHOTO.x, p.y - BTN_PHOTO.y) < BTN_PHOTO.r + 16) {
       takePhoto(); continue;
     }
@@ -573,7 +591,17 @@ function touchEnd(e) {
 canvas.addEventListener("touchend", touchEnd, { passive: false });
 canvas.addEventListener("touchcancel", touchEnd, { passive: false });
 
-function startGame() { initAudio(); genLevel(); state = "play"; }
+// INICIAR do menu: run nova do zero (noite 1, filme e álbum virgens)
+function startGame() {
+  initAudio();
+  level = 1;
+  sanity = 100; film = FILM_START;
+  album = []; albumIdx = 0; photoCount = 0;
+  albumReturn = "play";
+  seed = (seed + 7331) | 0;
+  genLevel();
+  state = "play";
+}
 function retry() {
   sanity = 100; film = FILM_START;
   album = []; albumIdx = 0; photoCount = 0;   // o filme da run anterior se perde
@@ -2155,9 +2183,36 @@ function drawAlbum() {
     ctx.fillStyle = "rgba(170,170,170,0.8)";
     ctx.fillText(`${albumIdx + 1} / ${album.length}`, canvas.width / 2, canvas.height - 56);
   }
+  // setas de navegação nas laterais (apagadas quando não há mais fotos)
+  if (album.length > 1) {
+    ctx.font = "bold 76px 'Courier New', monospace";
+    ctx.fillStyle = albumIdx > 0
+      ? `rgba(255,255,255,${0.55 + 0.25 * Math.sin(time * 4)})`
+      : "rgba(255,255,255,0.12)";
+    ctx.fillText("<", 72, canvas.height / 2);
+    ctx.fillStyle = albumIdx < album.length - 1
+      ? `rgba(255,255,255,${0.55 + 0.25 * Math.sin(time * 4)})`
+      : "rgba(255,255,255,0.12)";
+    ctx.fillText(">", canvas.width - 72, canvas.height / 2);
+  }
+
+  // botão FECHAR
+  const hovC = mouse.x >= ALB_CLOSE.x && mouse.x <= ALB_CLOSE.x + ALB_CLOSE.w &&
+               mouse.y >= ALB_CLOSE.y && mouse.y <= ALB_CLOSE.y + ALB_CLOSE.h;
+  ctx.fillStyle = "rgba(255,255,255,0.07)";
+  ctx.fillRect(ALB_CLOSE.x, ALB_CLOSE.y, ALB_CLOSE.w, ALB_CLOSE.h);
+  ctx.lineWidth = hovC ? 3 : 2;
+  ctx.strokeStyle = hovC ? "rgba(255,255,255,0.95)" : "rgba(255,255,255,0.5)";
+  ctx.strokeRect(ALB_CLOSE.x, ALB_CLOSE.y, ALB_CLOSE.w, ALB_CLOSE.h);
+  ctx.font = "bold 19px 'Courier New', monospace";
+  ctx.fillStyle = "rgba(230,230,230,0.9)";
+  ctx.fillText("FECHAR", ALB_CLOSE.x + ALB_CLOSE.w / 2, ALB_CLOSE.y + ALB_CLOSE.h / 2 + 1);
+
   ctx.font = "bold 12px 'Courier New', monospace";
   ctx.fillStyle = "rgba(140,140,140,0.7)";
-  ctx.fillText("← → navegar   ·   F fechar", canvas.width / 2, canvas.height - 28);
+  ctx.fillText(touchUI.seen ? "toque nas setas para passar as fotos"
+                            : "← → navegar   ·   F fechar",
+               canvas.width / 2, canvas.height - 28);
 }
 
 function drawDead() {
@@ -2170,20 +2225,30 @@ function drawDead() {
   ctx.font = "bold 14px 'Courier New', monospace";
   ctx.fillStyle = "rgba(180,180,180,0.8)";
   ctx.fillText(`você resistiu até a noite ${level}`, canvas.width / 2, canvas.height / 2 + 16);
-  ctx.fillStyle = "rgba(170,170,170,0.85)";
-  ctx.fillText("F — rever as fotos que você revelou", canvas.width / 2, canvas.height / 2 + 58);
-  ctx.fillStyle = `rgba(255,255,255,${0.4 + 0.4 * Math.sin(time * 3)})`;
-  ctx.fillText("ENTER — tentar novamente (as fotos se perdem)", canvas.width / 2, canvas.height / 2 + 86);
+  ctx.fillStyle = "rgba(170,170,170,0.8)";
+  ctx.fillText("as fotos reveladas se perdem ao jogar de novo",
+               canvas.width / 2, canvas.height / 2 + 52);
 
-  if (touchUI.seen) {   // botão de toque para rever as fotos
-    ctx.strokeStyle = "rgba(255,255,255,0.5)";
-    ctx.lineWidth = 1.5;
-    ctx.strokeRect(canvas.width / 2 - 130, canvas.height / 2 + 92, 260, 56);
-    ctx.fillStyle = "rgba(220,220,220,0.85)";
-    ctx.fillText("VER FOTOS", canvas.width / 2, canvas.height / 2 + 114);
-    ctx.font = "bold 11px 'Courier New', monospace";
-    ctx.fillStyle = "rgba(150,150,150,0.7)";
-    ctx.fillText("(toque fora do botão para recomeçar)", canvas.width / 2, canvas.height / 2 + 134);
+  // três botões grandes: VER FOTOS · JOGAR · MENU
+  for (const b of DEAD_BTNS) {
+    const hov = mouse.x >= b.x && mouse.x <= b.x + b.w &&
+                mouse.y >= b.y && mouse.y <= b.y + b.h;
+    ctx.fillStyle = "rgba(255,255,255,0.07)";
+    ctx.fillRect(b.x, b.y, b.w, b.h);
+    ctx.lineWidth = (hov || b.id === "jogar") ? 3 : 2;
+    ctx.strokeStyle = hov ? "rgba(255,255,255,0.95)"
+                          : b.id === "jogar"
+                            ? `rgba(255,255,255,${0.6 + 0.25 * Math.sin(time * 3)})`
+                            : "rgba(255,255,255,0.45)";
+    ctx.strokeRect(b.x, b.y, b.w, b.h);
+    ctx.font = "bold 25px 'Courier New', monospace";
+    ctx.fillStyle = b.id === "jogar" ? "rgba(255,255,255,0.95)" : "rgba(215,215,215,0.9)";
+    ctx.fillText(b.label, b.x + b.w / 2, b.y + b.h / 2 + 1);
+  }
+  if (!touchUI.seen) {
+    ctx.font = "bold 12px 'Courier New', monospace";
+    ctx.fillStyle = "rgba(140,140,140,0.7)";
+    ctx.fillText("F fotos · ENTER jogar · ESC menu", canvas.width / 2, canvas.height / 2 + 200);
   }
 }
 
