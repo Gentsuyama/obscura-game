@@ -80,6 +80,8 @@ const light = new Float32Array(COLS * ROWS);
 
 const player = { x: 20, y: 16 };
 const mouse  = { x: 600, y: 340 };
+const cam    = { x: 600, y: 340 };         // câmera (só dá zoom no celular)
+let camZoom  = 1;
 const keys   = new Set();
 
 let rooms = [], anomalies = [], filmPickups = [], ghosts = [], particles = [];
@@ -197,6 +199,7 @@ function genLevel() {
   for (let i = 0; i < nGhost; i++) ghosts.push(spawnGhost());
 
   flashT = 0; flashCd = 0; attractT = 0; eventT = 10 + rng() * 15;
+  cam.x = player.x * CELL; cam.y = player.y * CELL;   // câmera já nasce no jogador
 }
 
 function spawnGhost() {
@@ -1760,6 +1763,15 @@ function update(dt) {
     p.x += p.vx * dt; p.y += p.vy * dt;
     p.vx *= 0.94; p.vy *= 0.94;
   }
+
+  // --- câmera: no celular dá zoom e segue o jogador; no PC fica parada ---
+  const zTarget = touchUI.seen ? 2.0 : 1;
+  camZoom += (zTarget - camZoom) * Math.min(1, dt * 4);
+  const hw = canvas.width / (2 * camZoom), hh = canvas.height / (2 * camZoom);
+  const cx2 = Math.max(hw, Math.min(COLS * CELL - hw, player.x * CELL));
+  const cy2 = Math.max(hh, Math.min(ROWS * CELL - hh, player.y * CELL));
+  cam.x += (cx2 - cam.x) * Math.min(1, dt * 6);
+  cam.y += (cy2 - cam.y) * Math.min(1, dt * 6);
 }
 
 // ==================================================================
@@ -1772,9 +1784,11 @@ function render() {
 
   if (state === "intro") { drawIntro(); return; }
 
-  if (shake > 0)
-    ctx.setTransform(1, 0, 0, 1,
-      (Math.random() - 0.5) * 7 * shake, (Math.random() - 0.5) * 7 * shake);
+  const shx = shake > 0 ? (Math.random() - 0.5) * 7 * shake : 0;
+  const shy = shake > 0 ? (Math.random() - 0.5) * 7 * shake : 0;
+  ctx.setTransform(camZoom, 0, 0, camZoom,
+                   canvas.width / 2 - cam.x * camZoom + shx,
+                   canvas.height / 2 - cam.y * camZoom + shy);
 
   const dir = aimAngle();
   const tick = Math.floor(time * 12);
@@ -1872,10 +1886,12 @@ function render() {
   ctx.closePath(); ctx.fill();
   ctx.restore();
 
+  ctx.setTransform(1, 0, 0, 1, 0, 0);   // overlays abaixo são em espaço de tela
+
   // --- clarão do flash ---
   if (flashT > 0) {
     ctx.fillStyle = `rgba(255,255,255,${(flashT * flashT * 0.18).toFixed(3)})`;
-    ctx.fillRect(-10, -10, canvas.width + 20, canvas.height + 20);
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
   }
 
   // --- estática (sanidade baixa) ---
@@ -1888,8 +1904,6 @@ function render() {
       ctx.fillRect(Math.random() * canvas.width, Math.random() * canvas.height, 2, 2);
     }
   }
-
-  ctx.setTransform(1, 0, 0, 1, 0, 0);
 
   // --- mira (só faz sentido com mouse) ---
   if (state === "play" && aimSource === "mouse") {
