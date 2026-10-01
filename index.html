@@ -742,22 +742,26 @@ function penTools(g, r) {
           0.07 + 0.24 * b, 0.6 + r() * 0.5);
     }
 
-    // cabelo: fios finos caindo com gravidade, caóticos
+    // cabelo: fios que nascem no couro e já CAEM rente ao rosto
+    // (nada de velocidade para fora, que formava um halo/bola alto)
     for (let i = 0; i < 240; i++) {
       const a0 = -Math.PI + r() * Math.PI;
-      let x = Math.cos(a0) * R * (0.8 + r() * 0.25);
-      let y = Math.sin(a0) * R * (0.9 + r() * 0.25) - R * 0.1;
-      let vx2 = Math.cos(a0), vy2 = Math.sin(a0);
+      let x = Math.cos(a0) * R * (0.72 + r() * 0.14);
+      let y = Math.sin(a0) * R * (0.80 + r() * 0.14) - R * 0.08;
+      const wild = r() < 0.12;                       // raros fios rebeldes
+      const side = Math.cos(a0) >= 0 ? 1 : -1;       // escorre pelo seu lado
+      let vx2 = side * (0.25 + Math.abs(Math.cos(a0)) * 0.5) * (wild ? 2.2 : 1);
+      let vy2 = wild ? 0.15 + r() * 0.3 : 0.7 + r() * 0.3;
       g.strokeStyle = `rgba(215,215,222,${0.05 + r() * 0.2})`;
       g.lineWidth = 0.5 + r() * 0.8;
       g.beginPath(); g.moveTo(x, y);
       const segs = 4 + (r() * 4 | 0);
       for (let s2 = 0; s2 < segs; s2++) {
-        vx2 += (r() - 0.5) * 0.8;
-        vy2 += 0.5 + (r() - 0.5) * 0.4;
+        vx2 += (r() - 0.5) * 0.45;
+        vy2 += 0.85 + (r() - 0.5) * 0.3;
         const il = 1 / Math.hypot(vx2, vy2);
         vx2 *= il; vy2 *= il;
-        const len = R * (0.22 + r() * 0.35);
+        const len = R * (0.18 + r() * 0.28);
         x += vx2 * len; y += vy2 * len;
         g.lineTo(x, y);
       }
