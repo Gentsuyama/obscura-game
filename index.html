@@ -682,7 +682,9 @@ function penTools(g, r) {
   }
 
   // crânio completo, centrado em (cx,cy), raio R, levemente inclinado
-  function skull(cx, cy, R, tilt) {
+  // hairLen: 1 = cabelo longo; menor quando o corpo precisa aparecer
+  function skull(cx, cy, R, tilt, hairLen) {
+    hairLen = hairLen || 1;
     g.save();
     g.translate(cx, cy);
     g.rotate(tilt);
@@ -765,7 +767,7 @@ function penTools(g, r) {
         vy2 += 0.85 + (r() - 0.5) * 0.3;
         const il = 1 / Math.hypot(vx2, vy2);
         vx2 *= il; vy2 *= il;
-        const len = R * (0.18 + r() * 0.28);
+        const len = R * (0.18 + r() * 0.28) * hairLen;
         x += vx2 * len; y += vy2 * len;
         g.lineTo(x, y);
       }
@@ -1178,8 +1180,8 @@ function ghostBody(r) {
   T.hand(hRx, hRy + 8, 34 + r() * 10,
          Math.PI * (0.5 + (r() - 0.5) * 0.25), 0.14 + r() * 0.3, 0.3, 4 + (r() * 3 | 0));
 
-  // cabeça por cima de tudo, caída/torta
-  T.skull(hx, hy, R, (r() - 0.5) * 0.4);
+  // cabeça por cima de tudo, caída/torta (cabelo curto: o corpo precisa aparecer)
+  T.skull(hx, hy, R, (r() - 0.5) * 0.4, 0.55);
 
   cv._aspect = 0.65; cv._hscale = 1.12;
   return cv;
