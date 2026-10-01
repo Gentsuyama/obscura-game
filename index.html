@@ -700,17 +700,17 @@ function penTools(g, r) {
       i ? g.lineTo(x, y) : g.moveTo(x, y);
     }
     g.closePath(); g.fill();
-    // pescoço fino e torto descendo
+    // pescoço: curto e fino (comprido demais parecia um colete escuro)
     g.beginPath();
-    g.moveTo(-R * 0.32, R * 0.95);
-    g.quadraticCurveTo(-R * 0.22, R * 1.4, -R * (0.12 + r() * 0.08), R * 1.75);
-    g.lineTo(R * (0.16 + r() * 0.08), R * 1.75);
-    g.quadraticCurveTo(R * 0.26, R * 1.35, R * 0.30, R * 0.95);
+    g.moveTo(-R * 0.20, R * 0.95);
+    g.quadraticCurveTo(-R * 0.15, R * 1.1, -R * (0.08 + r() * 0.05), R * 1.3);
+    g.lineTo(R * (0.10 + r() * 0.05), R * 1.3);
+    g.quadraticCurveTo(R * 0.16, R * 1.1, R * 0.20, R * 0.95);
     g.closePath(); g.fill();
-    for (let i = 0; i < 14; i++) {       // riscos no pescoço
+    for (let i = 0; i < 8; i++) {        // riscos no pescoço
       const t = r();
-      pen(-R * 0.2 + r() * R * 0.4, R * (1.0 + t * 0.7),
-          -R * 0.2 + r() * R * 0.4 + (r() - 0.5) * 5, R * (1.0 + t * 0.7) + 6 + r() * 8,
+      pen(-R * 0.12 + r() * R * 0.24, R * (1.0 + t * 0.25),
+          -R * 0.12 + r() * R * 0.24 + (r() - 0.5) * 4, R * (1.0 + t * 0.25) + 4 + r() * 6,
           0.08 + r() * 0.15, 0.7);
     }
 
