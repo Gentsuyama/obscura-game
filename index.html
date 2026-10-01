@@ -1026,48 +1026,42 @@ function penTools(g, r) {
     }
   }
 
-  // tronco distorcido: silhueta irregular torta + hachura + costelas (sem bolhas)
+  // tronco esquelético: espinha fina + costelas, no mesmo traço dos braços
+  // (sem massa preenchida — o usuário prefere o corpo riscado e magro)
   function torso(cx, y0, y1, wTop, wBot, bend) {
-    g.fillStyle = "rgba(4,4,6,0.94)";
-    g.beginPath();
-    const steps = 9;
-    for (let i = 0; i <= steps; i++) {
-      const t = i / steps;
-      const y = y0 + (y1 - y0) * t;
-      const xoff = Math.sin(t * Math.PI) * bend;
-      const w2 = wTop + (wBot - wTop) * t;
-      const x = cx + xoff - w2 / 2 * (1 + (r() - 0.5) * 0.25);
-      i ? g.lineTo(x, y) : g.moveTo(x, y);
+    const mx2 = cx + bend, my2 = (y0 + y1) / 2;
+    const ex2 = cx + bend * 0.6;
+    function spine(t) {
+      return [(1 - t) * (1 - t) * cx + 2 * (1 - t) * t * mx2 + t * t * ex2,
+              (1 - t) * (1 - t) * y0 + 2 * (1 - t) * t * my2 + t * t * y1];
     }
-    for (let i = steps; i >= 0; i--) {
-      const t = i / steps;
-      const y = y0 + (y1 - y0) * t;
-      const xoff = Math.sin(t * Math.PI) * bend;
-      const w2 = wTop + (wBot - wTop) * t;
-      g.lineTo(cx + xoff + w2 / 2 * (1 + (r() - 0.5) * 0.25), y);
+    // espinha: mesma construção do braço (núcleo fino + linhas de osso)
+    arm(cx, y0, mx2, my2, ex2, y1, 5);
+    // clavícula torta
+    pen(cx - wTop * 0.45, y0 + 4 + (r() - 0.5) * 3,
+        cx + wTop * 0.45, y0 + 2 + (r() - 0.5) * 3, 0.4 + r() * 0.2, 1.4);
+    // costelas: pares de arcos finos saindo da espinha
+    const nR = 5 + (r() * 2 | 0);
+    for (let k = 0; k < nR; k++) {
+      const t = 0.12 + k * (0.55 / nR);
+      const [sx2, sy2] = spine(t);
+      const w2 = (wTop + (wBot - wTop) * t) * (0.55 + r() * 0.15);
+      for (const sd of [-1, 1]) {
+        g.strokeStyle = `rgba(222,222,230,${0.25 + r() * 0.3})`;
+        g.lineWidth = 1 + r() * 0.7;
+        g.beginPath();
+        g.moveTo(sx2, sy2);
+        g.quadraticCurveTo(sx2 + sd * w2 * 0.7, sy2 + 2 + r() * 3,
+                           sx2 + sd * w2, sy2 + w2 * 0.35 + r() * 4);
+        g.stroke();
+      }
     }
-    g.closePath(); g.fill();
-    // pele do tronco: hachura mais apagada que o rosto
-    for (let i = 0; i < 260; i++) {
-      const t = r();
-      const y = y0 + (y1 - y0) * t;
-      const xoff = Math.sin(t * Math.PI) * bend;
-      const w2 = (wTop + (wBot - wTop) * t) * 0.5;
-      const x = cx + xoff + (r() * 2 - 1) * w2 * 0.85;
-      const sa = -1.05 + (r() - 0.5) * 0.6;
-      const sl = 2 + r() * 4;
-      pen(x - Math.cos(sa) * sl, y - Math.sin(sa) * sl,
-          x + Math.cos(sa) * sl, y + Math.sin(sa) * sl,
-          0.04 + r() * 0.13, 0.6);
-    }
-    // costelas insinuadas
-    for (let k = 0; k < 5; k++) {
-      const t = 0.16 + k * 0.13;
-      const y = y0 + (y1 - y0) * t;
-      const xoff = Math.sin(t * Math.PI) * bend;
-      const w2 = (wTop + (wBot - wTop) * t) * 0.42;
-      pen(cx + xoff - w2, y + r() * 3, cx + xoff + w2, y - 2 + r() * 4,
-          0.18 + r() * 0.2, 0.9);
+    // farrapos soltos pendurados nas costelas
+    for (let k = 0; k < 14; k++) {
+      const [sx2, sy2] = spine(r());
+      const off = (r() - 0.5) * wTop * 0.9;
+      pen(sx2 + off, sy2, sx2 + off + (r() - 0.5) * 6, sy2 + 8 + r() * 16,
+          0.08 + r() * 0.18, 0.6);
     }
   }
 
