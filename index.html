@@ -751,7 +751,9 @@ function penTools(g, r) {
       const wild = r() < 0.12;                       // raros fios rebeldes
       const side = Math.cos(a0) >= 0 ? 1 : -1;       // escorre pelo seu lado
       // nasce quase parado: a gravidade assume na hora e o fio despenca justo
+      const overFace = !wild && r() < 0.22;          // uns poucos caem sobre o rosto
       let vx2 = wild ? side * (0.6 + r() * 0.8)
+                     : overFace ? (r() - 0.5) * 0.08
                      : side * (0.06 + Math.abs(Math.cos(a0)) * 0.12);
       let vy2 = wild ? 0.15 + r() * 0.3 : 0.08 + r() * 0.08;
       g.strokeStyle = `rgba(215,215,222,${0.05 + r() * 0.2})`;
