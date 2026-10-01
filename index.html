@@ -1821,8 +1821,11 @@ function render() {
   light.fill(0);
   let flick = 0.9 + 0.1 * hash(7, 13, tick);
   if (flickDip > 0) flick *= 0.3 + 0.35 * hash(3, 5, tick);
+  // no celular o cone abre ~20% (tela menor pede campo de visão maior)
+  const lHalf = LANTERNA.halfAngle * (touchUI.seen ? 1.2 : 1);
+  const lRays = touchUI.seen ? (LANTERNA.rays * 1.2) | 0 : LANTERNA.rays;
   castLight(player.x, player.y, dir,
-            LANTERNA.halfAngle, LANTERNA.range, LANTERNA.power * flick, LANTERNA.rays);
+            lHalf, LANTERNA.range, LANTERNA.power * flick, lRays);
   if (flashT > 0) {
     const p = FLASH.power * flashT * flashT;
     castLight(player.x, player.y, flashDir, FLASH.halfAngle, FLASH.range, p, FLASH.rays);
